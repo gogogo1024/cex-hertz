@@ -35,6 +35,12 @@ var bufferPool = sync.Pool{
 	},
 }
 
+var msgBytePool = sync.Pool{
+	New: func() any {
+		return make([]byte, 4096)
+	},
+}
+
 func init() {
 	for i := 0; i < shardNum; i++ {
 		channelShards[i] = &ChannelShard{
@@ -162,6 +168,17 @@ func Broadcast(channel string, msg []byte) {
 	}
 }
 
+func safeBroadcast(channel string, buf *bytes.Buffer) {
+	msg := msgBytePool.Get().([]byte)
+	if cap(msg) < buf.Len() {
+		msg = make([]byte, buf.Len())
+	}
+	msg = msg[:buf.Len()]
+	copy(msg, buf.Bytes())
+	Broadcast(channel, msg)
+	msgBytePool.Put(msg)
+}
+
 // 丢弃的消息异步写入 Kafka
 func saveDroppedMessage(channel string, msg []byte) {
 	// 直接写入 Kafka，topic 可用 "dropped_{channel}"
@@ -216,10 +233,8 @@ func PushMatchResult(channel string, orderID string, price string, quantity stri
 	buf.WriteString(`","ts":`)
 	buf.WriteString(fmt.Sprintf("%d", ts))
 	buf.WriteString("}}")
-	msg := make([]byte, buf.Len())
-	copy(msg, buf.Bytes())
+	safeBroadcast(channel, buf)
 	bufferPool.Put(buf)
-	Broadcast(channel, msg)
 }
 
 // 复杂消息组装示例：订单簿快照推送
@@ -250,10 +265,8 @@ func PushOrderBookSnapshot(channel string, bids, asks []string, ts int64) {
 	buf.WriteString("],\"ts\":")
 	buf.WriteString(fmt.Sprintf("%d", ts))
 	buf.WriteString("}}")
-	msg := make([]byte, buf.Len())
-	copy(msg, buf.Bytes())
+	safeBroadcast(channel, buf)
 	bufferPool.Put(buf)
-	Broadcast(channel, msg)
 }
 
 // NewWebSocketServer WebSocket 服务端
