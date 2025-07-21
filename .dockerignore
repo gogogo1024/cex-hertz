@@ -1,0 +1,18 @@
+# Go build cache
+/build
+/bin
+/output
+*.test
+*.out
+*.log
+*.db
+*.sqlite*
+*.bak
+*.tmp
+*.local.yml
+.env*
+.git
+.idea
+.vscode
+node_modules
+

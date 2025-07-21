@@ -2,6 +2,7 @@ package handler
 
 import (
 	"cex-hertz/biz/service"
+	"context"
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
@@ -23,10 +24,12 @@ type SubmitOrderResponse struct {
 }
 
 // SubmitOrder RESTful 下单接口
-func SubmitOrder(ctx *app.RequestContext) {
+func SubmitOrder(ctx context.Context, c *app.RequestContext) {
+	// 若后续有链路追踪、超时控制等需求，可用ctx
+	_ = ctx
 	var req SubmitOrderRequest
-	if err := ctx.BindAndValidate(&req); err != nil {
-		ctx.JSON(consts.StatusBadRequest, SubmitOrderResponse{
+	if err := c.BindAndValidate(&req); err != nil {
+		c.JSON(consts.StatusBadRequest, SubmitOrderResponse{
 			Type:    "order_ack",
 			Status:  "error",
 			Message: "invalid request: " + err.Error(),
@@ -34,7 +37,7 @@ func SubmitOrder(ctx *app.RequestContext) {
 		return
 	}
 	if req.Pair == "" || req.Side == "" || req.Price == "" || req.Quantity == "" {
-		ctx.JSON(consts.StatusBadRequest, SubmitOrderResponse{
+		c.JSON(consts.StatusBadRequest, SubmitOrderResponse{
 			Type:    "order_ack",
 			Status:  "error",
 			Message: "missing required fields",
@@ -49,7 +52,7 @@ func SubmitOrder(ctx *app.RequestContext) {
 		Quantity: req.Quantity,
 	}
 	service.Engine.SubmitOrder(order)
-	ctx.JSON(consts.StatusOK, SubmitOrderResponse{
+	c.JSON(consts.StatusOK, SubmitOrderResponse{
 		Type:    "order_ack",
 		OrderID: req.OrderID,
 		Pair:    req.Pair,

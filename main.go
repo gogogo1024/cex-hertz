@@ -3,12 +3,14 @@
 package main
 
 import (
+	"cex-hertz/biz/handler"
 	"cex-hertz/biz/service"
 	cexserver "cex-hertz/server"
 	"context"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 )
 
@@ -19,35 +21,87 @@ func main() {
 	defer h.Shutdown(context.Background())
 	defer wsServer.Shutdown(context.Background())
 
-	// 初始化 Postgres 连接池（使用默认连接串）
-	err := service.InitPostgresPool("postgres://postgres:postgres@localhost:5432/postgres")
-	if err != nil {
+	// 初始化 Postgres 连接池
+	if err := service.InitPostgresPool("postgres://postgres:postgres@localhost:5432/postgres"); err != nil {
 		panic(err)
 	}
 
 	// 初始化 Kafka Writer
 	brokers := []string{"localhost:9092"}
 	topic := "trades"
-	if envBrokers := os.Getenv("KAFKA_BROKERS"); envBrokers != "" {
+	if envBrokers := os.getEnv("KAFKA_BROKERS"); envBrokers != "" {
 		brokers = []string{envBrokers}
 	}
-	if envTopic := os.Getenv("KAFKA_TOPIC"); envTopic != "" {
+	if envTopic := os.getEnv("KAFKA_TOPIC"); envTopic != "" {
 		topic = envTopic
 	}
 	service.InitKafkaWriter(brokers, topic)
 
+	// 初始化 Redis
+	redisAddr := "localhost:6379"
+	redisPwd := ""
+	redisDB := 0
+	if envRedisAddr := os.getEnv("REDIS_ADDR"); envRedisAddr != "" {
+		redisAddr = envRedisAddr
+	}
+	if envRedisPwd := os.getEnv("REDIS_PWD"); envRedisPwd != "" {
+		redisPwd = envRedisPwd
+	}
+	if envRedisDB := os.getEnv("REDIS_DB"); envRedisDB != "" {
+		if v, err := strconv.Atoi(envRedisDB); err == nil {
+			redisDB = v
+		}
+	}
+	service.InitRedis(redisAddr, redisPwd, redisDB)
+
+	// 初始化 Consul 并注册撮合引擎节点
+	consulAddr := os.getEnv("CEX_CONSUL_ADDR")
+	if consulAddr == "" {
+		consulAddr = "127.0.0.1:8500"
+	}
+	nodeID := os.getEnv("CEX_NODE_ID")
+	if nodeID == "" {
+		nodeID = "node-1"
+	}
+	matchPairs := os.getEnv("CEX_MATCH_PAIRS")
+	if matchPairs == "" {
+		matchPairs = "BTCUSDT,ETHUSDT"
+	}
+	matchPort := 9000
+	if envPort := os.getEnv("CEX_MATCH_PORT"); envPort != "" {
+		if v, err := strconv.Atoi(envPort); err == nil {
+			matchPort = v
+		}
+	}
+	pairs := service.ParsePairs(matchPairs)
+	if err := service.InitMatchEngine(consulAddr, nodeID, pairs, matchPort); err != nil {
+		panic(err)
+	}
+
+	registerMiddleware(h)
+	registerRoutes(h)
+
 	go func() {
-		register(h)
 		h.Spin()
 	}()
-
 	go func() {
 		wsServer.Spin()
 	}()
 
-	// 优雅关闭，监听 SIGINT/SIGTERM
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	// 此处可加服务关闭逻辑
+}
+
+func registerMiddleware(h *server.Hertz) {
+	// 可在此注册全局中间件，如日志、恢复、CORS等
+	// h.Use(recovery.Recovery())
+	// h.Use(cors.Default())
+}
+
+func registerRoutes(h *server.Hertz) {
+	h.GET("/ping", handler.Ping)
+	orderGroup := h.Group("/api")
+	orderGroup.Use(handler.DistributedRouteMiddleware())
+	orderGroup.POST("/order", handler.SubmitOrder)
 }

@@ -68,8 +68,8 @@ func ensureChannelDispatcher(shard *ChannelShard, channel string) {
 			shard.Mu.RLock()
 			conns := shard.Subs[channel]
 			for conn := range conns {
-				broadcastPool.Submit(func() {
-					// 直接使用 msg，无需拷贝，假如业务需要组装消息可用 bytes.Buffer+sync.Pool
+				err := broadcastPool.Submit(func() {
+					// bytes.Buffer+sync.Pool
 					success := false
 					for i := 0; i < 3; i++ {
 						if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
@@ -94,6 +94,10 @@ func ensureChannelDispatcher(shard *ChannelShard, channel string) {
 					// 归还消息缓冲区到池（如果是从池获取的）
 					// msgBufferPool.Put(msg) // 若业务有 make/copy，可归还
 				})
+				if err != nil {
+					log.Printf("broadcastPool.Submit error: %v, conn: %v", err, conn.RemoteAddr())
+					// 可选：这里可以选择重试或直接 continue
+				}
 			}
 			shard.Mu.RUnlock()
 		}
@@ -139,10 +143,12 @@ func cleanConnFromAllChannels(c *websocket.Conn) {
 		shard := channelShards[i]
 		shard.Mu.Lock()
 		for ch, conns := range shard.Subs {
-			if _, ok := conns[c]; ok {
-				delete(conns, c)
-				if len(conns) == 0 {
-					delete(shard.Subs, ch)
+			if conns != nil {
+				if _, ok := conns[c]; ok {
+					delete(conns, c)
+					if len(conns) == 0 {
+						delete(shard.Subs, ch)
+					}
 				}
 			}
 		}
@@ -157,7 +163,7 @@ func Broadcast(channel string, msg []byte) {
 	ensureChannelDispatcher(shard, channel)
 	buf, ok := shard.MsgBuf[channel]
 	shard.Mu.Unlock()
-	if ok {
+	if ok && buf != nil {
 		select {
 		case buf <- msg:
 			// 写入成功
@@ -205,7 +211,7 @@ func getDroppedKafkaWriter(topic string) *kafka.Writer {
 		return w.(*kafka.Writer)
 	}
 	brokers := []string{"localhost:9092"}
-	if envBrokers := os.Getenv("KAFKA_BROKERS"); envBrokers != "" {
+	if envBrokers := os.getEnv("KAFKA_BROKERS"); envBrokers != "" {
 		brokers = []string{envBrokers}
 	}
 	w := &kafka.Writer{
@@ -217,7 +223,7 @@ func getDroppedKafkaWriter(topic string) *kafka.Writer {
 	return w
 }
 
-// 复杂消息组装示例：撮合结果推送
+// PushMatchResult 复杂消息组装示例：撮合结果推送
 func PushMatchResult(channel string, orderID string, price string, quantity string, ts int64) {
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -237,7 +243,7 @@ func PushMatchResult(channel string, orderID string, price string, quantity stri
 	bufferPool.Put(buf)
 }
 
-// 复杂消息组装示例：订单簿快照推送
+// PushOrderBookSnapshot 复杂消息组装示例：订单簿快照推送
 func PushOrderBookSnapshot(channel string, bids, asks []string, ts int64) {
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()

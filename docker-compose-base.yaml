@@ -1,0 +1,36 @@
+version: '3.8'
+services:
+  consul:
+    image: 'hashicorp/consul'
+    ports:
+      - 8500:8500
+    healthcheck:
+        test: [ "CMD", "consul", "members" ]
+        interval: 15s
+        timeout: 10s
+        retries: 5
+        start_period: 40s
+  pg:
+    image: 'postgres:15'
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+  redis:
+    image: 'redis:latest'
+    ports:
+      - "6379:6379"
+    healthcheck:
+        test: [ "CMD", "redis-cli", "ping" ]
+        interval: 20s
+        timeout: 5s
+        retries: 5
+        start_period: 2m

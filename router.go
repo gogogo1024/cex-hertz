@@ -10,8 +10,8 @@ import (
 // customizeRegister registers customize routers.
 func customizedRegister(r *server.Hertz) {
 	r.GET("/ping", handler.Ping)
-	r.POST("/api/order", handler.SubmitOrder)
 
-	// your code ...
-	// WebSocket 路由已独立服务，无需在此注册 /ws
+	orderGroup := r.Group("/api")
+	orderGroup.Use(handler.DistributedRouteMiddleware())
+	orderGroup.POST("/order", handler.SubmitOrder)
 }

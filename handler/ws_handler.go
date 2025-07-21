@@ -10,7 +10,7 @@ import (
 )
 
 // ConnContext 连接上下文，后续可扩展
-// 可挂载到 netpoll.Connection 的 Context
+// 可挂载到 netpoll.Connection ��� Context
 // 包含订阅频道等信息
 
 type ConnContext struct {
@@ -68,8 +68,8 @@ func OnMessage(ctx *ConnContext, data []byte) {
 			ctx.Conn.Write(respBytes)
 			return
 		}
-		// 调用撮合服务分发订单到对应 pair 的撮合线程池
-		service.Engine.SubmitOrder(service.SubmitOrderMsg(order))
+		// 分布式路由逻辑已由中间件处理，这里只需本地撮合
+		service.Engine.SubmitOrder(order)
 		resp := map[string]interface{}{
 			"type":     "order_ack",
 			"order_id": order.OrderID,
