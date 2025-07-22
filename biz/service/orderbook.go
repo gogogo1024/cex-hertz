@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cex-hertz/biz/model"
 	"fmt"
 	"github.com/huandu/skiplist"
 )
@@ -19,19 +20,19 @@ func NewOrderBook(pair string) *OrderBook {
 	}
 }
 
-func (ob *OrderBook) Match(order SubmitOrderMsg) ([]Trade, bool) {
-	trades := []Trade{}
+func (ob *OrderBook) Match(order model.SubmitOrderMsg) ([]model.Trade, bool) {
+	var trades []model.Trade
 	remainQty := toFloat(order.Quantity)
 	if order.Side == "buy" {
 		for remainQty > 0 && ob.sells.Len() > 0 {
 			minSellElem := ob.sells.Front()
 			minSellPrice := minSellElem.Key().(string)
 			if toFloat(order.Price) >= toFloat(minSellPrice) {
-				sellQueue := minSellElem.Value.([]SubmitOrderMsg)
+				sellQueue := minSellElem.Value.([]model.SubmitOrderMsg)
 				sell := &sellQueue[0]
 				makerQty := toFloat(sell.Quantity)
 				tradeQty := minFloat(remainQty, makerQty)
-				trades = append(trades, Trade{
+				trades = append(trades, model.Trade{
 					Price:      sell.Price,
 					Quantity:   fmt.Sprintf("%.8f", tradeQty),
 					TakerOrder: order.OrderID,
@@ -64,11 +65,11 @@ func (ob *OrderBook) Match(order SubmitOrderMsg) ([]Trade, bool) {
 			maxBuyElem := ob.buys.Front()
 			maxBuyPrice := maxBuyElem.Key().(string)
 			if toFloat(order.Price) <= toFloat(maxBuyPrice) {
-				buyQueue := maxBuyElem.Value.([]SubmitOrderMsg)
+				buyQueue := maxBuyElem.Value.([]model.SubmitOrderMsg)
 				buy := &buyQueue[0]
 				makerQty := toFloat(buy.Quantity)
 				tradeQty := minFloat(remainQty, makerQty)
-				trades = append(trades, Trade{
+				trades = append(trades, model.Trade{
 					Price:      buy.Price,
 					Quantity:   fmt.Sprintf("%.8f", tradeQty),
 					TakerOrder: order.OrderID,
@@ -99,27 +100,27 @@ func (ob *OrderBook) Match(order SubmitOrderMsg) ([]Trade, bool) {
 	return trades, false
 }
 
-func (ob *OrderBook) addOrder(book *skiplist.SkipList, order SubmitOrderMsg) {
+func (ob *OrderBook) addOrder(book *skiplist.SkipList, order model.SubmitOrderMsg) {
 	if elem := book.Get(order.Price); elem != nil {
-		queue := elem.Value.([]SubmitOrderMsg)
+		queue := elem.Value.([]model.SubmitOrderMsg)
 		queue = append(queue, order)
 		elem.Value = queue
 	} else {
-		book.Set(order.Price, []SubmitOrderMsg{order})
+		book.Set(order.Price, []model.SubmitOrderMsg{order})
 	}
 }
 
 func (ob *OrderBook) DepthSnapshot() map[string]interface{} {
-	bids := []map[string]string{}
+	var bids []map[string]string
 	for iter := ob.buys.Front(); iter != nil; iter = iter.Next() {
-		queue := iter.Value.([]SubmitOrderMsg)
+		queue := iter.Value.([]model.SubmitOrderMsg)
 		for _, o := range queue {
 			bids = append(bids, map[string]string{"price": o.Price, "quantity": o.Quantity})
 		}
 	}
-	asks := []map[string]string{}
+	var asks []map[string]string
 	for iter := ob.sells.Front(); iter != nil; iter = iter.Next() {
-		queue := iter.Value.([]SubmitOrderMsg)
+		queue := iter.Value.([]model.SubmitOrderMsg)
 		for _, o := range queue {
 			asks = append(asks, map[string]string{"price": o.Price, "quantity": o.Quantity})
 		}
@@ -138,14 +139,14 @@ type OrderBookSnapshot struct {
 func (ob *OrderBook) DeltaSnapshot(last *OrderBookSnapshot) map[string]interface{} {
 	currBids := map[string]string{}
 	for iter := ob.buys.Front(); iter != nil; iter = iter.Next() {
-		queue := iter.Value.([]SubmitOrderMsg)
+		queue := iter.Value.([]model.SubmitOrderMsg)
 		for _, o := range queue {
 			currBids[o.Price] = o.Quantity
 		}
 	}
 	currAsks := map[string]string{}
 	for iter := ob.sells.Front(); iter != nil; iter = iter.Next() {
-		queue := iter.Value.([]SubmitOrderMsg)
+		queue := iter.Value.([]model.SubmitOrderMsg)
 		for _, o := range queue {
 			currAsks[o.Price] = o.Quantity
 		}
@@ -193,7 +194,7 @@ func (ob *OrderBook) CancelOrder(orderID, side string, userID string) bool {
 		return false
 	}
 	for iter := book.Front(); iter != nil; iter = iter.Next() {
-		queue := iter.Value.([]SubmitOrderMsg)
+		queue := iter.Value.([]model.SubmitOrderMsg)
 		for i, o := range queue {
 			if o.OrderID == orderID {
 				queue = append(queue[:i], queue[i+1:]...)

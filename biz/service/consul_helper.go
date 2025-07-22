@@ -23,6 +23,27 @@ func NewConsulHelper(addr string) (*ConsulHelper, error) {
 	return &ConsulHelper{client: cli}, nil
 }
 
+// NewConsulHelperWithAddrs 支持多个 Consul 地址高可用
+func NewConsulHelperWithAddrs(addrs []string) (*ConsulHelper, error) {
+	var lastErr error
+	for _, addr := range addrs {
+		cfg := api.DefaultConfig()
+		cfg.Address = addr
+		cli, err := api.NewClient(cfg)
+		if err == nil {
+			// 尝试健康检查
+			_, errPing := cli.Agent().Self()
+			if errPing == nil {
+				return &ConsulHelper{client: cli}, nil
+			}
+			lastErr = errPing
+		} else {
+			lastErr = err
+		}
+	}
+	return nil, fmt.Errorf("all consul addresses failed: %v", lastErr)
+}
+
 // RegisterMatchEngine 注册撮合引擎服务到 Consul
 // nodeID: 唯一节点ID，pairs: 该节点负责的交易对列表
 func (c *ConsulHelper) RegisterMatchEngine(nodeID string, pairs []string, port int) error {

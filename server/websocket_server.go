@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cex-hertz/conf"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,13 +12,16 @@ import (
 	"github.com/panjf2000/ants/v2"
 	"github.com/segmentio/kafka-go"
 	"log"
-	"os"
 	"sync"
 )
 
 const shardNum = 32
 
-var upgrader = websocket.HertzUpgrader{} // use default options
+var upgrader = websocket.HertzUpgrader{
+	CheckOrigin: func(ctx *app.RequestContext) bool {
+		return true // 允许所有跨域 WebSocket 连接
+	},
+} // use default options
 
 type ChannelShard struct {
 	Mu     sync.RWMutex
@@ -210,10 +214,8 @@ func getDroppedKafkaWriter(topic string) *kafka.Writer {
 	if w, ok := droppedKafkaWriters.Load(topic); ok {
 		return w.(*kafka.Writer)
 	}
-	brokers := []string{"localhost:9092"}
-	if envBrokers := os.getEnv("KAFKA_BROKERS"); envBrokers != "" {
-		brokers = []string{envBrokers}
-	}
+
+	brokers := conf.GetConf().Kafka.Brokers
 	w := &kafka.Writer{
 		Addr:  kafka.TCP(brokers...),
 		Topic: topic,
@@ -278,7 +280,7 @@ func PushOrderBookSnapshot(channel string, bids, asks []string, ts int64) {
 // NewWebSocketServer WebSocket 服务端
 func NewWebSocketServer(addr string) *server.Hertz {
 	h := server.Default(server.WithHostPorts(addr))
-
+	h.NoHijackConnPool = true
 	h.GET("/ws", func(_ context.Context, c *app.RequestContext) {
 		err := upgrader.Upgrade(c, func(conn *websocket.Conn) {
 			defer func() {

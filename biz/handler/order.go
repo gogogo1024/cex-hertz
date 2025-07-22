@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"cex-hertz/biz/model"
 	"cex-hertz/biz/service"
 	"context"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -44,7 +45,7 @@ func SubmitOrder(ctx context.Context, c *app.RequestContext) {
 		})
 		return
 	}
-	order := service.SubmitOrderMsg{
+	order := model.SubmitOrderMsg{
 		OrderID:  req.OrderID,
 		Pair:     req.Pair,
 		Side:     req.Side,

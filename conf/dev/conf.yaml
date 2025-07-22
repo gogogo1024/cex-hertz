@@ -11,7 +11,13 @@ hertz:
   log_max_backups: 50
   registry_addr: "consul:8500"
   metrics_port: ":9996"
+  ws_port: ":9997"
 
+registry:
+  registry_address:
+    - consul:8500
+  username: ""
+  password: ""
 mysql:
   dsn: "gorm:gorm@tcp(mysql:3306)/gorm?charset=utf8mb4&parseTime=True&loc=Local"
 
@@ -20,3 +26,15 @@ redis:
   username: ""
   password: ""
   db: 0
+
+postgres:
+  dsn: "postgres://postgres:postgres@localhost:5432/postgres"
+
+kafka:
+  brokers:
+    - "localhost:9092"
+  topic: "trades"
+match_engine:
+  node_id: "node-1"
+  match_pairs: "BTCUSDT,ETHUSDT"
+  match_port: 9997

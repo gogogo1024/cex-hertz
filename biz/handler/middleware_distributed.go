@@ -2,6 +2,7 @@ package handler
 
 import (
 	"cex-hertz/biz/service"
+	"cex-hertz/biz/util"
 	"context"
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
@@ -25,7 +26,7 @@ func DistributedRouteMiddleware() app.HandlerFunc {
 				c.Abort()
 				return
 			}
-			if !service.IsLocalMatchEngine(pair) {
+			if !util.IsLocalMatchEngine(pair) {
 				if err := service.ForwardOrderToMatchEngine(pair, c.Request.Body()); err != nil {
 					hlog.Errorf("order forward failed: %v", err)
 					c.String(502, "order forward failed: %v", err)

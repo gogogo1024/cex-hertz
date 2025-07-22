@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"cex-hertz/biz/model"
 	"cex-hertz/biz/service"
 	"cex-hertz/server"
 	"encoding/json"
@@ -10,21 +11,12 @@ import (
 )
 
 // ConnContext 连接上下文，后续可扩展
-// 可挂载到 netpoll.Connection ��� Context
+// 可挂载到 netpoll.Connection   Context
 // 包含订阅频道等信息
 
 type ConnContext struct {
 	Conn     netpoll.Connection
 	Channels map[string]struct{} // 已订阅频道
-}
-
-// SubmitOrderMsg 提交订单消息格式
-type SubmitOrderMsg struct {
-	OrderID  string `json:"order_id"`
-	Pair     string `json:"pair"`
-	Side     string `json:"side"`
-	Price    string `json:"price"`
-	Quantity string `json:"quantity"`
 }
 
 // OnMessage 处理收到的 WebSocket 消息
@@ -54,7 +46,7 @@ func OnMessage(ctx *ConnContext, data []byte) {
 			delete(ctx.Channels, channel)
 		}
 	case "SubmitOrder":
-		var order SubmitOrderMsg
+		var order model.SubmitOrderMsg
 		if err := json.Unmarshal(data, &order); err != nil {
 			log.Printf("invalid SubmitOrder: %v", err)
 			return

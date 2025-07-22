@@ -95,11 +95,14 @@ var (
 )
 
 type Config struct {
-	Env string
-
-	Hertz Hertz `yaml:"hertz"`
-	MySQL MySQL `yaml:"mysql"`
-	Redis Redis `yaml:"redis"`
+	Env         string
+	Hertz       Hertz       `yaml:"hertz"`
+	MySQL       MySQL       `yaml:"mysql"`
+	Redis       Redis       `yaml:"redis"`
+	Postgres    Postgres    `yaml:"postgres"`
+	Kafka       Kafka       `yaml:"kafka"`
+	MatchEngine MatchEngine `yaml:"match_engine"`
+	Registry    Registry    `yaml:"registry"`
 }
 
 type MySQL struct {
@@ -125,9 +128,9 @@ type Registry struct {
 	Password        string   `yaml:"password"`
 }
 type MatchEngine struct {
-	NodeID     string   `yaml:"node_id"`
-	MatchPairs []string `yaml:"match_pairs"`
-	MatchPort  int      `yaml:"match_port"`
+	NodeID     string `yaml:"node_id"`
+	MatchPairs string `yaml:"match_pairs"`
+	MatchPort  int    `yaml:"match_port"`
 }
 type Hertz struct {
 	Service         string `yaml:"service"`
@@ -142,9 +145,7 @@ type Hertz struct {
 	LogMaxAge       int    `yaml:"log_max_age"`
 	RegistryAddr    string `yaml:"registry_addr"`
 	MetricsPort     string `yaml:"metrics_port"`
-}
-type WebSocket struct {
-	Address string `yaml:"address"`
+	WsPort          string `yaml:"ws_port"`
 }
 
 // GetConf gets configuration instance

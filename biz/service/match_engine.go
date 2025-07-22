@@ -2,11 +2,12 @@ package service
 
 import (
 	"bytes"
+	"cex-hertz/biz/model"
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/go-redis/redis/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 	"net/http"
 	"sync"
@@ -21,18 +22,8 @@ import (
 
 type MatchEngine struct {
 	// 每个交易对一个撮合队列
-	orderQueues map[string]chan SubmitOrderMsg
+	orderQueues map[string]chan model.SubmitOrderMsg
 	mu          sync.RWMutex
-}
-
-// SubmitOrderMsg 订单结构体（与 handler 保持一致）
-type SubmitOrderMsg struct {
-	OrderID  string
-	Pair     string
-	Side     string
-	Price    string
-	Quantity string
-	UserID   string // 新增 UserID 字段
 }
 
 var (
@@ -42,19 +33,14 @@ var (
 
 func NewMatchEngine() *MatchEngine {
 	return &MatchEngine{
-		orderQueues: make(map[string]chan SubmitOrderMsg),
+		orderQueues: make(map[string]chan model.SubmitOrderMsg),
 	}
 }
 
-// InitMatchEngine 初始化撮合引擎并注册到Consul
-func InitMatchEngine(consulAddr, nodeID string, pairs []string, port int) error {
-	h, err := NewConsulHelper(consulAddr)
-	if err != nil {
-		return err
-	}
-	consulHelper = h
-	err = consulHelper.RegisterMatchEngine(nodeID, pairs, port)
-	if err != nil {
+// InitMatchEngineWithHelper 支持传入 ConsulHelper 实例，便于多地址高可用
+func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, pairs []string, port int) error {
+	consulHelper = helper
+	if err := consulHelper.RegisterMatchEngine(nodeID, pairs, port); err != nil {
 		return err
 	}
 	hlog.Infof("MatchEngine节点已注册到Consul, nodeID=%s, pairs=%v, port=%d", nodeID, pairs, port)
@@ -62,12 +48,12 @@ func InitMatchEngine(consulAddr, nodeID string, pairs []string, port int) error 
 }
 
 // SubmitOrder 按 pair 分发订单到对应撮合队列
-func (m *MatchEngine) SubmitOrder(order SubmitOrderMsg) {
+func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	hlog.Infof("SubmitOrder called, order_id=%s, pair=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Pair, order.Side, order.Price, order.Quantity)
 	m.mu.Lock()
 	queue, ok := m.orderQueues[order.Pair]
 	if !ok {
-		queue = make(chan SubmitOrderMsg, 10000) // 每个交易对一个队列
+		queue = make(chan model.SubmitOrderMsg, 10000) // 每个交易对一个队列
 		m.orderQueues[order.Pair] = queue
 		// 启动独立撮合 worker goroutine
 		go m.matchWorker(order.Pair, queue)
@@ -81,13 +67,13 @@ func (m *MatchEngine) SubmitOrder(order SubmitOrderMsg) {
 }
 
 // 每个交易对独立撮合 worker
-func (m *MatchEngine) matchWorker(pair string, queue chan SubmitOrderMsg) {
+func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) {
 	orderBook := NewOrderBook(pair)
 	engineID := "node-1" // 可通过配置或环境变量设置
 	hlog.Infof("撮合线程启动, pair=%s, engine_id=%s", pair, engineID)
 	var lastSnapshot *OrderBookSnapshot = &OrderBookSnapshot{Bids: map[string]string{}, Asks: map[string]string{}}
 	for order := range queue {
-		hlog.Infof("撮���订单, order_id=%s, pair=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Pair, order.Side, order.Price, order.Quantity)
+		hlog.Infof("撮合订单, order_id=%s, pair=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Pair, order.Side, order.Price, order.Quantity)
 		trades, filled := orderBook.Match(order)
 		var bids, asks interface{}
 		if filled {
@@ -143,8 +129,8 @@ func (m *MatchEngine) matchWorker(pair string, queue chan SubmitOrderMsg) {
 				hlog.Infof("成交回报, trade_id=%s, pair=%s, price=%s, quantity=%s", trade.TradeID, trade.Pair, trade.Price, trade.Quantity)
 			}
 		} else {
-			hlog.Infof("订��未成交，推送订单簿变更, order_id=%s, pair=%s", order.OrderID, order.Pair)
-			// 未成交，推送订单簿�����更
+			hlog.Infof("订单未成交，推送订单簿变更, order_id=%s, pair=%s", order.OrderID, order.Pair)
+			// 未成交，推送订单簿变更
 			depth := orderBook.DepthSnapshot()
 			bids, _ = depth["buys"]
 			asks, _ = depth["sells"]
@@ -201,7 +187,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan SubmitOrderMsg) {
 					Broadcast(pair, deltaMsg)
 				}
 			}
-			// ���新 lastSnapshot
+			// 新 lastSnapshot
 			// 重新生成全量 bids/asks map
 			newBids := map[string]string{}
 			for _, b := range bids.([]map[string]string) {
@@ -216,22 +202,6 @@ func (m *MatchEngine) matchWorker(pair string, queue chan SubmitOrderMsg) {
 		// 缓存订单簿快照到 Redis
 		cacheOrderBookSnapshot(pair, bids, asks)
 	}
-}
-
-// Trade 简单订单簿实现（仅示例，实际可用更高效结构）
-// Trade 回报结构体，支持多档撮合
-type Trade struct {
-	Pair       string `json:"pair"`
-	Price      string `json:"price"`
-	Quantity   string `json:"quantity"`
-	Timestamp  int64  `json:"timestamp"`
-	TakerOrder string `json:"taker_order_id"`
-	MakerOrder string `json:"maker_order_id"`
-	Side       string `json:"side"`
-	EngineID   string `json:"engine_id"`
-	TradeID    string `json:"trade_id"`
-	TakerUser  string `json:"taker_user"`
-	MakerUser  string `json:"maker_user"`
 }
 
 // OrderBook 及其相关方法已全部迁移至 orderbook.go，仅保留类型引用和必要的调用。
@@ -263,7 +233,7 @@ func Broadcast(channel string, msg []byte) {
 
 var (
 	kafkaWriter    *kafka.Writer
-	tradeBatchChan chan Trade
+	tradeBatchChan chan model.Trade
 )
 
 func InitKafkaWriter(brokers []string, topic string) {
@@ -272,7 +242,7 @@ func InitKafkaWriter(brokers []string, topic string) {
 		Topic: topic,
 		Async: true,
 	}
-	tradeBatchChan = make(chan Trade, 10000)
+	tradeBatchChan = make(chan model.Trade, 10000)
 	go batchKafkaWriter()
 }
 
@@ -309,7 +279,7 @@ func flushKafkaBatch(batch *[]kafka.Message) {
 	*batch = (*batch)[:0]
 }
 
-func saveTradeToKafka(trade Trade) {
+func saveTradeToKafka(trade model.Trade) {
 	if tradeBatchChan != nil {
 		tradeBatchChan <- trade
 	}
@@ -326,7 +296,7 @@ func InitPostgresPool(connStr string) error {
 	return nil
 }
 
-func saveTradeToDB(trade Trade) {
+func saveTradeToDB(trade model.Trade) {
 	if pgPool == nil {
 		hlog.Warnf("Postgres连接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
 		return
@@ -365,7 +335,7 @@ func cacheOrderBookSnapshot(pair string, bids, asks interface{}) {
 }
 
 // 缓存成交记录到 Redis List
-func cacheTrade(pair string, trade Trade, maxLen int64) {
+func cacheTrade(pair string, trade model.Trade, maxLen int64) {
 	if redisClient == nil {
 		return
 	}
@@ -438,64 +408,25 @@ type EngineOrderMsg struct {
 }
 
 // 判断本节点是否负责该symbol
-func IsLocalMatchEngine(symbol string) bool {
-	if consulHelper == nil {
-		return true // 未启用Consul则全部本地处理
-	}
-	// 假设本节点注册时的pairs在内存中
-	// 这里简单用环境变量/全局变量判断
-	// 实际可维护一份本节点负责的symbol集合
-	return isLocalSymbol(symbol)
-}
+// 建议迁移到 util.go 工具函数文件中
+// func IsLocalMatchEngine(symbol string) bool {
+// 	if consulHelper == nil {
+// 		return true // 未启用Consul则全部本地处理
+// 	}
+// 	return isLocalSymbol(symbol)
+// }
 
 // isLocalSymbol 判断symbol是否属于本节点
-func isLocalSymbol(symbol string) bool {
-	// 可用全局变量或配置保存本节点负责的pairs
-	// 这里用环境变量CEX_MATCH_PAIRS
-	pairs := getLocalPairs(cfg)
-	for _, p := range pairs {
-		if p == symbol {
-			return true
-		}
-	}
-	return false
-}
-
-// getLocalPairs 通过传入配置获取本节点负责的交易对
-func getLocalPairs(cfg *Config) []string {
-	return cfg.MatchPairs
-}
-
-// ParsePairs 工具函数，解析逗号分隔的交易对字符串
-func ParsePairs(s string) []string {
-	var res []string
-	for _, p := range splitAndTrim(s, ",") {
-		if p != "" {
-			res = append(res, p)
-		}
-	}
-	return res
-}
-
-func splitAndTrim(s, sep string) []string {
-	var res []string
-	for _, v := range split(s, sep) {
-		res = append(res, trim(v))
-	}
-	return res
-}
-
-func split(s, sep string) []string {
-	var res []string
-	for _, v := range bytes.Split([]byte(s), []byte(sep)) {
-		res = append(res, string(v))
-	}
-	return res
-}
-
-func trim(s string) string {
-	return string(bytes.TrimSpace([]byte(s)))
-}
+// 建议迁移到 util.go 工具函数文件中
+// func isLocalSymbol(symbol string) bool {
+// 	pairs := getLocalPairs(cfg)
+// 	for _, p := range pairs {
+// 		if p == symbol {
+// 			return true
+// 		}
+// 	}
+// 	return false
+// }
 
 // ForwardOrderToMatchEngine 转发订单到目标撮合节点（HTTP示例）
 func ForwardOrderToMatchEngine(symbol string, data []byte) error {

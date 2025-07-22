@@ -5,76 +5,48 @@ package main
 import (
 	"cex-hertz/biz/handler"
 	"cex-hertz/biz/service"
+	"cex-hertz/biz/util"
+	"cex-hertz/conf"
 	cexserver "cex-hertz/server"
 	"context"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 )
 
 func main() {
+	cfg := conf.GetConf()
+
 	h := server.Default()
-	wsServer := cexserver.NewWebSocketServer(":8081")
+	hsPort := cfg.Hertz.WsPort
+	if len(hsPort) > 0 && hsPort[0] == ':' {
+		hsPort = hsPort[1:]
+	}
+	wsServer := cexserver.NewWebSocketServer(":" + hsPort)
 
 	defer h.Shutdown(context.Background())
 	defer wsServer.Shutdown(context.Background())
 
-	// 初始化 Postgres 连接池
-	if err := service.InitPostgresPool("postgres://postgres:postgres@localhost:5432/postgres"); err != nil {
-		panic(err)
-	}
-
+	// 初始化 Postgres 连接池（如有需要可调用对应初始化）
 	// 初始化 Kafka Writer
-	brokers := []string{"localhost:9092"}
-	topic := "trades"
-	if envBrokers := os.getEnv("KAFKA_BROKERS"); envBrokers != "" {
-		brokers = []string{envBrokers}
-	}
-	if envTopic := os.getEnv("KAFKA_TOPIC"); envTopic != "" {
-		topic = envTopic
-	}
-	service.InitKafkaWriter(brokers, topic)
-
-	// 初始化 Redis
-	redisAddr := "localhost:6379"
-	redisPwd := ""
-	redisDB := 0
-	if envRedisAddr := os.getEnv("REDIS_ADDR"); envRedisAddr != "" {
-		redisAddr = envRedisAddr
-	}
-	if envRedisPwd := os.getEnv("REDIS_PWD"); envRedisPwd != "" {
-		redisPwd = envRedisPwd
-	}
-	if envRedisDB := os.getEnv("REDIS_DB"); envRedisDB != "" {
-		if v, err := strconv.Atoi(envRedisDB); err == nil {
-			redisDB = v
-		}
-	}
-	service.InitRedis(redisAddr, redisPwd, redisDB)
+	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topic)
 
 	// 初始化 Consul 并注册撮合引擎节点
-	consulAddr := os.getEnv("CEX_CONSUL_ADDR")
-	if consulAddr == "" {
-		consulAddr = "127.0.0.1:8500"
+	consulAddrs := cfg.Registry.RegistryAddress // []string
+	if len(consulAddrs) == 0 {
+		panic("Consul address list is empty")
 	}
-	nodeID := os.getEnv("CEX_NODE_ID")
-	if nodeID == "" {
-		nodeID = "node-1"
+	nodeID := cfg.MatchEngine.NodeID
+	matchPairs := cfg.MatchEngine.MatchPairs
+	matchPort := cfg.MatchEngine.MatchPort
+	pairs := util.ParsePairs(matchPairs)
+	// 使用多地址高可用
+	consulHelper, err := service.NewConsulHelperWithAddrs(consulAddrs)
+	if err != nil {
+		panic(err)
 	}
-	matchPairs := os.getEnv("CEX_MATCH_PAIRS")
-	if matchPairs == "" {
-		matchPairs = "BTCUSDT,ETHUSDT"
-	}
-	matchPort := 9000
-	if envPort := os.getEnv("CEX_MATCH_PORT"); envPort != "" {
-		if v, err := strconv.Atoi(envPort); err == nil {
-			matchPort = v
-		}
-	}
-	pairs := service.ParsePairs(matchPairs)
-	if err := service.InitMatchEngine(consulAddr, nodeID, pairs, matchPort); err != nil {
+	if err := service.InitMatchEngineWithHelper(consulHelper, nodeID, pairs, matchPort); err != nil {
 		panic(err)
 	}
 
