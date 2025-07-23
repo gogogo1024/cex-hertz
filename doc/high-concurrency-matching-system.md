@@ -1,4 +1,3 @@
-
 # 超高并发撮合系统架构设计文档
 
 ## 一、系统架构总览
@@ -18,6 +17,31 @@
                                      +--------v--------+
                                      | PostgreSQL + Redis |
                                      +-------------------+
+```
+
+### 架构图（Mermaid）
+
+```mermaid
+flowchart TD
+    Client[客户端]
+    APIGW[API 网关 (HTTP)]
+    WS[WebSocket 网关]
+    MQ[消息队列 (Kafka)]
+    MatchCluster[撮合服务集群]
+    Redis[Redis 缓存]
+    PG[PostgreSQL]
+    Consul[Consul 注册中心]
+
+    Client -- HTTP请求 --> APIGW
+    Client -- WebSocket连接 --> WS
+    APIGW -- 下单/查询 --> MatchCluster
+    WS -- 订阅/推送 --> MQ
+    MQ -- 撮合结果/行情 --> WS
+    MatchCluster -- 撮合结果 --> MQ
+    MatchCluster -- 订单/资产 --> Redis
+    MatchCluster -- 持久化 --> PG
+    MatchCluster -- 服务注册 --> Consul
+    WS -- 订阅管理 --> Redis
 ```
 
 ## 二、模块一：WebSocket 网关（支持频道机制）
@@ -106,3 +130,27 @@
 - Kafka 实现撮合与广播解耦。
 - Redis 保证状态数据快速访问。
 - 使用 Kubernetes 弹性扩容。
+
+## 高并发撮合系统架构总览
+
+### 主要模块说明
+
+- **API 网关**：负责 HTTP 接口（下单、查询、撤单等），流量入口，鉴权、限流。
+- **WebSocket 网关**：负责客户端连接、订阅管理、行情/撮合结果推送，与撮合服务解耦，支持横向扩展。
+- **撮合服务集群**：核心撮合逻辑，订单簿管理，分片部署，支持多交易对并行撮合。
+- **消息队列（Kafka）**：撮合结果、行情等异步推送，解耦网关与撮合服务，支持高并发分发。
+- **Redis**：缓存订单簿、行情快照、订阅关系等，提升查询和推送效率。
+- **PostgreSQL**：持久化订单、成交、资产等核心数据。
+- **Consul 注册中心**：服务发现与健康检查，支持撮合服务动态扩容。
+
+### 高并发设计思路
+
+- WebSocket 网关与撮合服务集群彻底拆分，互不影响扩展和稳定性。
+- 撮合服务分片部署，支持多交易对并行撮合，避免单点瓶颈。
+- 消息队列解耦推送链路，支持千万级订阅者高效分发。
+- Redis 缓存热点数据，减少数据库压力。
+- Consul 支持服务自动注册与故障转移。
+
+---
+
+如需详细业务流程或接口说明，可进一步补充。

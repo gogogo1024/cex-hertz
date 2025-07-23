@@ -4,7 +4,7 @@ import (
 	"cex-hertz/conf"
 )
 
-// IsLocalMatchEngine 判断本节点是否负责��� symbol
+// IsLocalMatchEngine 判断本节点是否负责该symbol
 func IsLocalMatchEngine(symbol string) bool {
 	cfg := conf.GetConf()
 	return isLocalSymbol(symbol, cfg)

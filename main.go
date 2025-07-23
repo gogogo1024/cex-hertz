@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cex-hertz/biz/dal/pg"
 	"cex-hertz/biz/handler"
 	"cex-hertz/biz/service"
 	"cex-hertz/biz/util"
@@ -17,6 +18,14 @@ import (
 
 func main() {
 	cfg := conf.GetConf()
+
+	// 初始化 GORM DB
+	if err := pg.InitGorm(); err != nil {
+		panic("GORM DB 初始化失败: " + err.Error())
+	}
+	if err := pg.AutoMigrate(); err != nil {
+		panic("GORM 自动迁移失败: " + err.Error())
+	}
 
 	h := server.Default()
 	hsPort := cfg.Hertz.WsPort
@@ -76,4 +85,7 @@ func registerRoutes(h *server.Hertz) {
 	orderGroup := h.Group("/api")
 	orderGroup.Use(handler.DistributedRouteMiddleware())
 	orderGroup.POST("/order", handler.SubmitOrder)
+	orderGroup.GET("/order/:id", handler.GetOrder)
+	orderGroup.GET("/orders", handler.ListOrders)
+	orderGroup.POST("/order/cancel", handler.CancelOrder)
 }

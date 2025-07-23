@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"cex-hertz/biz/dal/pg"
 	"cex-hertz/biz/model"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -31,6 +33,14 @@ var (
 	consulHelper *ConsulHelper
 )
 
+// 内存订单存储结构
+var (
+	orderStore   = make(map[string]model.SubmitOrderMsg) // orderID -> order
+	userOrderMap = make(map[string][]string)             // userID -> []orderID
+	orderStatus  = make(map[string]string)               // orderID -> status
+	storeMu      sync.RWMutex
+)
+
 func NewMatchEngine() *MatchEngine {
 	return &MatchEngine{
 		orderQueues: make(map[string]chan model.SubmitOrderMsg),
@@ -47,7 +57,7 @@ func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, pairs []stri
 	return nil
 }
 
-// SubmitOrder 按 pair 分发订单到对应撮合队列
+// SubmitOrder 持久化到数据库
 func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	hlog.Infof("SubmitOrder called, order_id=%s, pair=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Pair, order.Side, order.Price, order.Quantity)
 	m.mu.Lock()
@@ -59,6 +69,16 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 		go m.matchWorker(order.Pair, queue)
 	}
 	m.mu.Unlock()
+
+	storeMu.Lock()
+	orderStore[order.OrderID] = order
+	userOrderMap[order.UserID] = append(userOrderMap[order.UserID], order.OrderID)
+	orderStatus[order.OrderID] = "active"
+	storeMu.Unlock()
+
+	// 持久化到数据库
+	pg.InsertOrder(order.OrderID, order.UserID, order.Pair, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
+
 	// 缓存用户活跃订单ID
 	if order.UserID != "" {
 		cacheUserActiveOrder(order.UserID, order.OrderID)
@@ -68,6 +88,12 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 
 // 每个交易对独立撮合 worker
 func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) {
+	defer func() {
+		if r := recover(); r != nil {
+			hlog.Errorf("撮合线程panic, pair=%s, err=%v", pair, r)
+		}
+		hlog.Infof("撮合线程退出, pair=%s", pair)
+	}()
 	orderBook := NewOrderBook(pair)
 	engineID := "node-1" // 可通过配置或环境变量设置
 	hlog.Infof("撮合线程启动, pair=%s, engine_id=%s", pair, engineID)
@@ -97,8 +123,8 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 						"price":       trade.Price,
 						"quantity":    trade.Quantity,
 						"side":        trade.Side,
-						"taker_order": trade.TakerOrder,
-						"maker_order": trade.MakerOrder,
+						"taker_order": trade.TakerOrderID,
+						"maker_order": trade.MakerOrderID,
 						"taker_user":  trade.TakerUser,
 						"maker_user":  trade.MakerUser,
 						"timestamp":   trade.Timestamp,
@@ -120,7 +146,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 				if err == nil {
 					Broadcast(pair, msg)
 				}
-				// 持久化到 Kafka
+				// 持久化�� Kafka
 				saveTradeToKafka(trade)
 				// 持久化到 PostgreSQL
 				saveTradeToDB(trade)
@@ -304,7 +330,7 @@ func saveTradeToDB(trade model.Trade) {
 	_, err := pgPool.Exec(context.Background(),
 		`INSERT INTO trades (trade_id, pair, price, quantity, timestamp, taker_order_id, maker_order_id, side, engine_id, taker_user, maker_user)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-		trade.TradeID, trade.Pair, trade.Price, trade.Quantity, trade.Timestamp, trade.TakerOrder, trade.MakerOrder, trade.Side, trade.EngineID, trade.TakerUser, trade.MakerUser,
+		trade.TradeID, trade.Pair, trade.Price, trade.Quantity, trade.Timestamp, trade.TakerOrderID, trade.MakerOrderID, trade.Side, trade.EngineID, trade.TakerUser, trade.MakerUser,
 	)
 	if err != nil {
 		hlog.Errorf("持久化成交到Postgres失败, trade_id=%s, err=%v", trade.TradeID, err)
@@ -437,8 +463,9 @@ func ForwardOrderToMatchEngine(symbol string, data []byte) error {
 	if err != nil || len(nodes) == 0 {
 		return fmt.Errorf("no match engine found for symbol %s", symbol)
 	}
-	// 取第一个节点（可做负载均衡）
-	url := fmt.Sprintf("http://%s:%d/submit_order", nodes[0].Address, nodes[0].Port)
+	// 随机选择一个节点实现负载均衡
+	idx := rand.Intn(len(nodes))
+	url := fmt.Sprintf("http://%s:%d/submit_order", nodes[idx].Address, nodes[idx].Port)
 	resp, err := httpPost(url, data)
 	if err != nil {
 		return err
@@ -458,4 +485,53 @@ func httpPost(url string, data []byte) (*http.Response, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return client.Do(req)
+}
+
+// GetOrderByID 查询单个订单（优先查数据库）
+func (m *MatchEngine) GetOrderByID(orderID string) (model.SubmitOrderMsg, error) {
+	order, err := pg.GetOrderByID(orderID)
+	if err != nil {
+		return model.SubmitOrderMsg{}, err
+	}
+	return model.SubmitOrderMsg{
+		OrderID:  order.OrderID,
+		UserID:   order.UserID,
+		Pair:     order.Pair,
+		Side:     order.Side,
+		Price:    order.Price,
+		Quantity: order.Quantity,
+	}, nil
+}
+
+// ListOrders 查询订单列表（优先查数据库）
+func (m *MatchEngine) ListOrders(userID, status string) ([]model.SubmitOrderMsg, error) {
+	rows, err := pg.ListOrders(userID, status)
+	if err != nil {
+		return nil, err
+	}
+	var result []model.SubmitOrderMsg
+	for _, row := range rows {
+		result = append(result, model.SubmitOrderMsg{
+			OrderID:  row.OrderID,
+			UserID:   row.UserID,
+			Pair:     row.Pair,
+			Side:     row.Side,
+			Price:    row.Price,
+			Quantity: row.Quantity,
+		})
+	}
+	return result, nil
+}
+
+// CancelOrder 取消订单（持久化状态到数据库）
+func (m *MatchEngine) CancelOrder(orderID, userID string) (string, error) {
+	order, err := m.GetOrderByID(orderID)
+	if err != nil || order.UserID != userID {
+		return "not_found", err
+	}
+	err = pg.UpdateOrderStatus(orderID, "cancelled")
+	if err != nil {
+		return "error", err
+	}
+	return "cancelled", nil
 }
