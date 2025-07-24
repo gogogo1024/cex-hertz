@@ -8,6 +8,7 @@ import (
 	"cex-hertz/biz/service"
 	"cex-hertz/biz/util"
 	"cex-hertz/conf"
+	"cex-hertz/middleware"
 	cexserver "cex-hertz/server"
 	"context"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -83,9 +84,11 @@ func registerMiddleware(h *server.Hertz) {
 func registerRoutes(h *server.Hertz) {
 	h.GET("/ping", handler.Ping)
 	orderGroup := h.Group("/api")
-	orderGroup.Use(handler.DistributedRouteMiddleware())
+	orderGroup.Use(middleware.DistributedRouteMiddleware())
 	orderGroup.POST("/order", handler.SubmitOrder)
 	orderGroup.GET("/order/:id", handler.GetOrder)
 	orderGroup.GET("/orders", handler.ListOrders)
 	orderGroup.POST("/order/cancel", handler.CancelOrder)
+	orderGroup.GET("/balance", handler.GetBalance)
+	orderGroup.GET("/positions", handler.GetPositions)
 }

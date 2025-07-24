@@ -1,4 +1,4 @@
-package handler
+package middleware
 
 import (
 	"cex-hertz/biz/service"
