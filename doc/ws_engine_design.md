@@ -44,7 +44,7 @@
 {
   "channel": "BTC-USDT",
   "type": "depth_update",
-  "data": { ... }
+  "data": { "xx":"yy"}
 }
 ```
 

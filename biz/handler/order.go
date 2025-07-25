@@ -3,6 +3,7 @@ package handler
 import (
 	"cex-hertz/biz/dal/pg"
 	"cex-hertz/biz/model"
+	"cex-hertz/biz/service"
 	"context"
 	"fmt"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -38,7 +39,7 @@ func SubmitOrder(ctx context.Context, c *app.RequestContext) {
 	}
 	req.Status = "active"
 	req.UpdatedAt = req.CreatedAt
-	if err := pg.CreateOrder(&req); err != nil {
+	if err := service.CreateOrder(&req); err != nil {
 		c.JSON(consts.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 		return
 	}
@@ -48,7 +49,7 @@ func SubmitOrder(ctx context.Context, c *app.RequestContext) {
 // GetOrder 查询单个订单
 func GetOrder(ctx context.Context, c *app.RequestContext) {
 	orderID := c.Param("id")
-	order, err := pg.GetOrder(orderID)
+	order, err := pg.GetOrderByID(orderID)
 	if err != nil {
 		c.JSON(consts.StatusNotFound, map[string]interface{}{"error": "order not found"})
 		return
@@ -60,7 +61,7 @@ func GetOrder(ctx context.Context, c *app.RequestContext) {
 func ListOrders(ctx context.Context, c *app.RequestContext) {
 	userID := string(c.Query("user_id"))
 	status := string(c.Query("status"))
-	orders, err := pg.ListOrders(userID, status)
+	orders, err := service.ListOrders(userID, status)
 	if err != nil {
 		c.JSON(consts.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 		return
@@ -68,7 +69,7 @@ func ListOrders(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, orders)
 }
 
-// 取消订单
+// CancelOrder 取消订单
 func CancelOrder(ctx context.Context, c *app.RequestContext) {
 	type CancelOrderRequest struct {
 		OrderID string `json:"order_id"`
@@ -79,12 +80,12 @@ func CancelOrder(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "invalid request"})
 		return
 	}
-	order, err := pg.GetOrder(req.OrderID)
+	order, err := pg.GetOrderByID(req.OrderID)
 	if err != nil || order.UserID != req.UserID {
 		c.JSON(consts.StatusNotFound, map[string]interface{}{"error": "order not found or user mismatch"})
 		return
 	}
-	if err := pg.UpdateOrderStatus(req.OrderID, "cancelled"); err != nil {
+	if err := service.UpdateOrderStatus(req.OrderID, "cancelled"); err != nil {
 		c.JSON(consts.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 		return
 	}

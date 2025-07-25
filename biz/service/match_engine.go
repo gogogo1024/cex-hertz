@@ -77,7 +77,7 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	storeMu.Unlock()
 
 	// 持久化到数据库
-	pg.InsertOrder(order.OrderID, order.UserID, order.Pair, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
+	InsertOrder(order.OrderID, order.UserID, order.Pair, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
 
 	// 缓存用户活跃订单ID
 	if order.UserID != "" {
@@ -489,7 +489,7 @@ func httpPost(url string, data []byte) (*http.Response, error) {
 
 // GetOrderByID 查询单个订单（优先查数据库）
 func (m *MatchEngine) GetOrderByID(orderID string) (model.SubmitOrderMsg, error) {
-	order, err := pg.GetOrderByID(orderID)
+	order, err := GetOrderByID(orderID)
 	if err != nil {
 		return model.SubmitOrderMsg{}, err
 	}
