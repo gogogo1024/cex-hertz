@@ -33,11 +33,11 @@ func (ob *OrderBook) Match(order model.SubmitOrderMsg) ([]model.Trade, bool) {
 				makerQty := toFloat(sell.Quantity)
 				tradeQty := minFloat(remainQty, makerQty)
 				trades = append(trades, model.Trade{
-					Price:      sell.Price,
-					Quantity:   fmt.Sprintf("%.8f", tradeQty),
-					TakerOrder: order.OrderID,
-					MakerOrder: sell.OrderID,
-					Side:       "buy",
+					Price:        sell.Price,
+					Quantity:     fmt.Sprintf("%.8f", tradeQty),
+					TakerOrderID: order.OrderID,
+					MakerOrderID: sell.OrderID,
+					Side:         "buy",
 				})
 				remainQty -= tradeQty
 				sell.Quantity = fmt.Sprintf("%.8f", makerQty-tradeQty)
@@ -70,11 +70,11 @@ func (ob *OrderBook) Match(order model.SubmitOrderMsg) ([]model.Trade, bool) {
 				makerQty := toFloat(buy.Quantity)
 				tradeQty := minFloat(remainQty, makerQty)
 				trades = append(trades, model.Trade{
-					Price:      buy.Price,
-					Quantity:   fmt.Sprintf("%.8f", tradeQty),
-					TakerOrder: order.OrderID,
-					MakerOrder: buy.OrderID,
-					Side:       "sell",
+					Price:        buy.Price,
+					Quantity:     fmt.Sprintf("%.8f", tradeQty),
+					TakerOrderID: order.OrderID,
+					MakerOrderID: buy.OrderID,
+					Side:         "sell",
 				})
 				remainQty -= tradeQty
 				buy.Quantity = fmt.Sprintf("%.8f", makerQty-tradeQty)
