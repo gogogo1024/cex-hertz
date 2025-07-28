@@ -14,7 +14,7 @@ type SubmitOrderMsg struct {
 	UserID   string // 新增 UserID 字段
 }
 
-// 订单模型（GORM）
+// Order 订单模型（GORM）
 type Order struct {
 	OrderID   string         `gorm:"primaryKey;column:order_id" json:"order_id"`
 	UserID    string         `gorm:"column:user_id" json:"user_id"`

@@ -125,4 +125,7 @@ func registerRoutes(h *server.Hertz) {
 	orderGroup.POST("/order/cancel", handler.CancelOrder)
 	orderGroup.GET("/balance", handler.GetBalance)
 	orderGroup.GET("/positions", handler.GetPositions)
+	orderGroup.GET("/depth", handler.GetDepth)
+	orderGroup.GET("/trades", handler.GetTrades)
+	orderGroup.GET("/ticker", handler.GetTicker)
 }

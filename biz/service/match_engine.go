@@ -2,7 +2,6 @@ package service
 
 import (
 	"bytes"
-	"cex-hertz/biz/dal/pg"
 	"cex-hertz/biz/model"
 	"context"
 	"encoding/json"
@@ -505,7 +504,7 @@ func (m *MatchEngine) GetOrderByID(orderID string) (model.SubmitOrderMsg, error)
 
 // ListOrders 查询订单列表（优先查数据库）
 func (m *MatchEngine) ListOrders(userID, status string) ([]model.SubmitOrderMsg, error) {
-	rows, err := pg.ListOrders(userID, status)
+	rows, err := ListOrders(userID, status)
 	if err != nil {
 		return nil, err
 	}
@@ -529,7 +528,7 @@ func (m *MatchEngine) CancelOrder(orderID, userID string) (string, error) {
 	if err != nil || order.UserID != userID {
 		return "not_found", err
 	}
-	err = pg.UpdateOrderStatus(orderID, "cancelled")
+	err = UpdateOrderStatus(orderID, "cancelled")
 	if err != nil {
 		return "error", err
 	}
