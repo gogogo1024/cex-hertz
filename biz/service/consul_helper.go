@@ -79,3 +79,8 @@ func (c *ConsulHelper) DiscoverMatchEngine(symbol string) ([]*api.AgentService, 
 	}
 	return result, nil
 }
+
+// Client 返回 consul client
+func (c *ConsulHelper) Client() *api.Client {
+	return c.client
+}

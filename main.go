@@ -68,6 +68,11 @@ func main() {
 		panic(err)
 	}
 
+	// 启动基于 Consul 分布式锁的 K 线补偿定时任务
+	if consulHelper.Client() != nil {
+		service.StartKlineCompensateTask(consulHelper.Client())
+	}
+
 	registerMiddleware(h)
 	registerRoutes(h)
 
@@ -128,4 +133,5 @@ func registerRoutes(h *server.Hertz) {
 	orderGroup.GET("/depth", handler.GetDepth)
 	orderGroup.GET("/trades", handler.GetTrades)
 	orderGroup.GET("/ticker", handler.GetTicker)
+	orderGroup.GET("/kline", handler.GetKline)
 }

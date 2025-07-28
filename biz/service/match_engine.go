@@ -2,12 +2,12 @@ package service
 
 import (
 	"bytes"
+	"cex-hertz/biz/dal/redis"
 	"cex-hertz/biz/model"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 	"math/rand"
 	"net/http"
@@ -321,6 +321,64 @@ func InitPostgresPool(connStr string) error {
 	return nil
 }
 
+//// K线周期定义
+//var klinePeriods = []string{"1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"}
+//var klinePeriodSeconds = map[string]int64{
+//	"1m":  60,
+//	"5m":  300,
+//	"15m": 900,
+//	"30m": 1800,
+//	"1h":  3600,
+//	"4h":  14400,
+//	"1d":  86400,
+//	"1w":  604800,
+//	"1M":  2592000, // 30天
+//}
+
+//// 聚合并写入多周期K线
+//func updateKlines(db *gorm.DB, pair, price, qty string, ts int64) {
+//	for _, period := range klinePeriods {
+//		bucket := ts / klinePeriodSeconds[period] * klinePeriodSeconds[period]
+//		var k model.Kline
+//		err := db.Where("pair = ? AND period = ? AND timestamp = ?", pair, period, bucket).First(&k).Error
+//		if err == gorm.ErrRecordNotFound {
+//			// 新K线
+//			k = model.Kline{
+//				Pair:      pair,
+//				Period:    period,
+//				Timestamp: bucket,
+//				Open:      price,
+//				Close:     price,
+//				High:      price,
+//				Low:       price,
+//				Volume:    qty,
+//			}
+//			db.Create(&k)
+//		} else if err == nil {
+//			// 更新K线
+//			if price > k.High {
+//				k.High = price
+//			}
+//			if price < k.Low {
+//				k.Low = price
+//			}
+//			k.Close = price
+//			// 累加成交量
+//			if v, err := strconv.ParseFloat(k.Volume, 64); err == nil {
+//				if q, err := strconv.ParseFloat(qty, 64); err == nil {
+//					k.Volume = strconv.FormatFloat(v+q, 'f', -1, 64)
+//				}
+//			}
+//			db.Save(&k)
+//		}
+//		// 写入Redis
+//		b, _ := json.Marshal(k)
+//		redisKey := "kline:" + pair + ":" + period
+//		redis.RedisClient.RPush(context.Background(), redisKey, b)
+//		redis.RedisClient.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
+//	}
+//}
+
 func saveTradeToDB(trade model.Trade) {
 	if pgPool == nil {
 		hlog.Warnf("Postgres连接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
@@ -334,74 +392,60 @@ func saveTradeToDB(trade model.Trade) {
 	if err != nil {
 		hlog.Errorf("持久化成交到Postgres失败, trade_id=%s, err=%v", trade.TradeID, err)
 	}
-}
-
-var redisClient *redis.Client
-
-func InitRedis(addr, password string, db int) {
-	redisClient = redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       db,
-	})
+	// 新增K线聚合写入
+	UpdateKlines(trade.Pair, trade.Price, trade.Quantity, trade.Timestamp/1000)
 }
 
 // 缓存订单簿快照到 Redis
 func cacheOrderBookSnapshot(pair string, bids, asks interface{}) {
-	if redisClient == nil {
-		return
-	}
 	ctx := context.Background()
 	key := "orderbook:" + pair
 	val, err := json.Marshal(map[string]interface{}{"bids": bids, "asks": asks})
 	if err == nil {
-		redisClient.Set(ctx, key, val, 5*time.Second)
+		redis.RedisClient.Set(ctx, key, val, 5*time.Second)
 	}
 }
 
 // 缓存成交记录到 Redis List
 func cacheTrade(pair string, trade model.Trade, maxLen int64) {
-	if redisClient == nil {
-		return
-	}
 	ctx := context.Background()
 	key := "trades:" + pair
 	val, err := json.Marshal(trade)
 	if err == nil {
-		redisClient.LPush(ctx, key, val)
-		redisClient.LTrim(ctx, key, 0, maxLen-1)
+		redis.RedisClient.LPush(ctx, key, val)
+		redis.RedisClient.LTrim(ctx, key, 0, maxLen-1)
 	}
 }
 
 // 缓存用户活跃订单ID到 Redis
 func cacheUserActiveOrder(userID, orderID string) {
-	if redisClient == nil || userID == "" || orderID == "" {
+	if userID == "" || orderID == "" {
 		return
 	}
 	ctx := context.Background()
 	key := "user:active_orders:" + userID
-	redisClient.SAdd(ctx, key, orderID)
-	redisClient.Expire(ctx, key, 24*time.Hour)
+	redis.RedisClient.SAdd(ctx, key, orderID)
+	redis.RedisClient.Expire(ctx, key, 24*time.Hour)
 }
 
 // 从 Redis 移除用户活跃订单ID
 func removeUserActiveOrder(userID, orderID string) {
-	if redisClient == nil || userID == "" || orderID == "" {
+	if userID == "" || orderID == "" {
 		return
 	}
 	ctx := context.Background()
 	key := "user:active_orders:" + userID
-	redisClient.SRem(ctx, key, orderID)
+	redis.RedisClient.SRem(ctx, key, orderID)
 }
 
 // 查询用户活跃订单ID列表
 func GetUserActiveOrders(userID string) ([]string, error) {
-	if redisClient == nil || userID == "" {
+	if userID == "" {
 		return nil, nil
 	}
 	ctx := context.Background()
 	key := "user:active_orders:" + userID
-	return redisClient.SMembers(ctx, key).Result()
+	return redis.RedisClient.SMembers(ctx, key).Result()
 }
 
 // OrderStatus 订单状态常量
