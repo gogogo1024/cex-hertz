@@ -164,8 +164,8 @@ func initConf() {
 	v.AutomaticEnv()
 
 	//// 支持多路径查找，兼容 IDE/workspace
-	//v.AddConfigPath(fmt.Sprintf("conf/%s", env))    // conf/test/
-	//v.AddConfigPath(fmt.Sprintf("../conf/%s", env)) // ../conf/test/
+	v.AddConfigPath(fmt.Sprintf("conf/%s", env))    // conf/test/
+	v.AddConfigPath(fmt.Sprintf("../conf/%s", env)) // ../conf/test/
 	//v.AddConfigPath(".")                            // 当前目录
 	//v.AddConfigPath("..")                           // 上级目录
 	//// 新增：项目根目录的 conf/test

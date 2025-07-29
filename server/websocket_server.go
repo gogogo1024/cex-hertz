@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"cex-hertz/biz/engine"
+	"cex-hertz/biz/model"
 	"cex-hertz/conf"
 	"context"
 	"encoding/json"
@@ -23,13 +25,13 @@ var upgrader = websocket.HertzUpgrader{
 	},
 } // use default options
 
-type ChannelShard struct {
+type SymbolShard struct {
 	Mu     sync.RWMutex
 	Subs   map[string]map[*websocket.Conn]struct{}
-	MsgBuf map[string]chan []byte // 每个频道的消息缓冲区
+	MsgBuf map[string]chan []byte // 每个symbol的消息缓冲区
 }
 
-var channelShards [shardNum]*ChannelShard
+var symbolShards [shardNum]*SymbolShard
 
 var broadcastPool *ants.Pool
 
@@ -47,7 +49,7 @@ var msgBytePool = sync.Pool{
 
 func init() {
 	for i := 0; i < shardNum; i++ {
-		channelShards[i] = &ChannelShard{
+		symbolShards[i] = &SymbolShard{
 			Subs:   make(map[string]map[*websocket.Conn]struct{}),
 			MsgBuf: make(map[string]chan []byte),
 		}
@@ -60,20 +62,19 @@ func init() {
 	broadcastPool = pool
 }
 
-// 启动频道消息分发 goroutine
-func ensureChannelDispatcher(shard *ChannelShard, channel string) {
-	if _, ok := shard.MsgBuf[channel]; ok {
+// 启动symbol消息分发 goroutine
+func ensureSymbolDispatcher(shard *SymbolShard, symbol string) {
+	if _, ok := shard.MsgBuf[symbol]; ok {
 		return
 	}
-	msgBuf := make(chan []byte, 4096) // 环形缓冲区，容量可调
-	shard.MsgBuf[channel] = msgBuf
+	msgBuf := make(chan []byte, 4096)
+	shard.MsgBuf[symbol] = msgBuf
 	go func() {
 		for msg := range msgBuf {
 			shard.Mu.RLock()
-			conns := shard.Subs[channel]
+			conns := shard.Subs[symbol]
 			for conn := range conns {
 				err := broadcastPool.Submit(func() {
-					// bytes.Buffer+sync.Pool
 					success := false
 					for i := 0; i < 3; i++ {
 						if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
@@ -84,37 +85,33 @@ func ensureChannelDispatcher(shard *ChannelShard, channel string) {
 						}
 					}
 					if !success {
-						log.Printf("conn write failed after retries, will remove from channel: %v", conn.RemoteAddr())
-						shard := GetShard(channel)
+						log.Printf("conn write failed after retries, will remove from symbol: %v", conn.RemoteAddr())
+						shard := GetSymbolShard(symbol)
 						shard.Mu.Lock()
-						delete(shard.Subs[channel], conn)
-						if len(shard.Subs[channel]) == 0 {
-							delete(shard.Subs, channel)
+						delete(shard.Subs[symbol], conn)
+						if len(shard.Subs[symbol]) == 0 {
+							delete(shard.Subs, symbol)
 						}
 						shard.Mu.Unlock()
-						cleanConnFromAllChannels(conn)
+						cleanConnFromAllSymbols(conn)
 						_ = conn.Close()
 					}
-					// 归还消息缓冲区到池（如果是从池获取的）
-					// msgBufferPool.Put(msg) // 若业务有 make/copy，可归还
 				})
 				if err != nil {
 					log.Printf("broadcastPool.Submit error: %v, conn: %v", err, conn.RemoteAddr())
-					// 可选：这里可以选择重试或直接 continue
 				}
 			}
 			shard.Mu.RUnlock()
 		}
-		// 关闭时自动清理
 		shard.Mu.Lock()
-		delete(shard.MsgBuf, channel)
+		delete(shard.MsgBuf, symbol)
 		shard.Mu.Unlock()
 	}()
 }
 
-func GetShard(channel string) *ChannelShard {
-	h := fnv32(channel)
-	return channelShards[h%shardNum]
+func GetSymbolShard(symbol string) *SymbolShard {
+	h := fnv32(symbol)
+	return symbolShards[h%shardNum]
 }
 
 func fnv32(key string) uint32 {
@@ -126,11 +123,11 @@ func fnv32(key string) uint32 {
 	return h
 }
 
-// 解析 action/channel
+// 解析 action/symbol
 
 type Message struct {
-	Action  string `json:"action"`
-	Channel string `json:"channel"`
+	Action string `json:"action"`
+	Symbol string `json:"symbol"`
 }
 
 func parseAction(msg []byte) (string, string) {
@@ -138,20 +135,20 @@ func parseAction(msg []byte) (string, string) {
 	if err := json.Unmarshal(msg, &m); err != nil {
 		return "", ""
 	}
-	return m.Action, m.Channel
+	return m.Action, m.Symbol
 }
 
-// 清理连接所有频道订阅
-func cleanConnFromAllChannels(c *websocket.Conn) {
+// 清理连接所有symbol订阅
+func cleanConnFromAllSymbols(c *websocket.Conn) {
 	for i := 0; i < shardNum; i++ {
-		shard := channelShards[i]
+		shard := symbolShards[i]
 		shard.Mu.Lock()
-		for ch, conns := range shard.Subs {
+		for sym, conns := range shard.Subs {
 			if conns != nil {
 				if _, ok := conns[c]; ok {
 					delete(conns, c)
 					if len(conns) == 0 {
-						delete(shard.Subs, ch)
+						delete(shard.Subs, sym)
 					}
 				}
 			}
@@ -160,51 +157,45 @@ func cleanConnFromAllChannels(c *websocket.Conn) {
 	}
 }
 
-// Broadcast 广播消息到频道
-func Broadcast(channel string, msg []byte) {
-	shard := GetShard(channel)
+// Broadcast 广播消息到symbol
+func Broadcast(symbol string, msg []byte) {
+	shard := GetSymbolShard(symbol)
 	shard.Mu.Lock()
-	ensureChannelDispatcher(shard, channel)
-	buf, ok := shard.MsgBuf[channel]
+	ensureSymbolDispatcher(shard, symbol)
+	buf, ok := shard.MsgBuf[symbol]
 	shard.Mu.Unlock()
 	if ok && buf != nil {
 		select {
 		case buf <- msg:
 			// 写入成功
 		default:
-			log.Printf("channel %s ring buffer full, drop message", channel)
-			go saveDroppedMessage(channel, msg)
+			log.Printf("symbol %s ring buffer full, drop message", symbol)
+			go saveDroppedMessage(symbol, msg)
 		}
 	}
 }
 
-func safeBroadcast(channel string, buf *bytes.Buffer) {
+func safeBroadcast(symbol string, buf *bytes.Buffer) {
 	msg := msgBytePool.Get().([]byte)
 	if cap(msg) < buf.Len() {
 		msg = make([]byte, buf.Len())
 	}
 	msg = msg[:buf.Len()]
 	copy(msg, buf.Bytes())
-	Broadcast(channel, msg)
+	Broadcast(symbol, msg)
 	msgBytePool.Put(msg)
 }
 
 // 丢弃的消息异步写入 Kafka
-func saveDroppedMessage(channel string, msg []byte) {
-	// 直接写入 Kafka，topic 可用 "dropped_{channel}"
+func saveDroppedMessage(symbol string, msg []byte) {
 	go func() {
-		topic := "dropped_" + channel
+		topic := "dropped_" + symbol
 		w := getDroppedKafkaWriter(topic)
 		if w == nil {
 			log.Printf("failed to get dropped kafka writer for topic %s", topic)
 			return
 		}
-		err := w.WriteMessages(context.Background(),
-			kafka.Message{Value: msg},
-		)
-		if err != nil {
-			log.Printf("failed to write dropped message to kafka: %v", err)
-		}
+		_ = w.WriteMessages(context.Background(), kafka.Message{Value: msg})
 	}()
 }
 
@@ -226,11 +217,11 @@ func getDroppedKafkaWriter(topic string) *kafka.Writer {
 }
 
 // PushMatchResult 复杂消息组装示例：撮合结果推送
-func PushMatchResult(channel string, orderID string, price string, quantity string, ts int64) {
+func PushMatchResult(symbol string, orderID string, price string, quantity string, ts int64) {
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	buf.WriteString(`{"channel":"`)
-	buf.WriteString(channel)
+	buf.WriteString(`{"symbol":"`)
+	buf.WriteString(symbol)
 	buf.WriteString(`","type":"match_result","data":{`)
 	buf.WriteString(`"order_id":"`)
 	buf.WriteString(orderID)
@@ -241,16 +232,16 @@ func PushMatchResult(channel string, orderID string, price string, quantity stri
 	buf.WriteString(`","ts":`)
 	buf.WriteString(fmt.Sprintf("%d", ts))
 	buf.WriteString("}}")
-	safeBroadcast(channel, buf)
+	safeBroadcast(symbol, buf)
 	bufferPool.Put(buf)
 }
 
 // PushOrderBookSnapshot 复杂消息组装示例：订单簿快照推送
-func PushOrderBookSnapshot(channel string, bids, asks []string, ts int64) {
+func PushOrderBookSnapshot(symbol string, bids, asks []string, ts int64) {
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	buf.WriteString(`{"channel":"`)
-	buf.WriteString(channel)
+	buf.WriteString(`{"symbol":"`)
+	buf.WriteString(symbol)
 	buf.WriteString(`","type":"depth_update","data":{`)
 	buf.WriteString(`"bids":[`)
 	for i, b := range bids {
@@ -273,8 +264,15 @@ func PushOrderBookSnapshot(channel string, bids, asks []string, ts int64) {
 	buf.WriteString("],\"ts\":")
 	buf.WriteString(fmt.Sprintf("%d", ts))
 	buf.WriteString("}}")
-	safeBroadcast(channel, buf)
+	safeBroadcast(symbol, buf)
 	bufferPool.Put(buf)
+}
+
+var matchEngine engine.Engine
+
+// InjectEngine 注入撮合引擎实例
+func InjectEngine(e engine.Engine) {
+	matchEngine = e
 }
 
 // NewWebSocketServer WebSocket 服务端
@@ -284,7 +282,7 @@ func NewWebSocketServer(addr string) *server.Hertz {
 	h.GET("/ws", func(_ context.Context, c *app.RequestContext) {
 		err := upgrader.Upgrade(c, func(conn *websocket.Conn) {
 			defer func() {
-				cleanConnFromAllChannels(conn)
+				cleanConnFromAllSymbols(conn)
 				if err := conn.Close(); err != nil {
 					log.Printf("close error: %v", err)
 				}
@@ -297,39 +295,54 @@ func NewWebSocketServer(addr string) *server.Hertz {
 					break
 				}
 
-				action, channel := parseAction(msg)
-				if action == "subscribe" && channel != "" {
-					shard := GetShard(channel)
+				action, symbol := parseAction(msg)
+				if action == "subscribe" && symbol != "" {
+					shard := GetSymbolShard(symbol)
 					shard.Mu.Lock()
-					if shard.Subs[channel] == nil {
-						shard.Subs[channel] = make(map[*websocket.Conn]struct{})
+					if shard.Subs[symbol] == nil {
+						shard.Subs[symbol] = make(map[*websocket.Conn]struct{})
 					}
-					shard.Subs[channel][conn] = struct{}{}
+					shard.Subs[symbol][conn] = struct{}{}
 					shard.Mu.Unlock()
-					ack := []byte(`{"type":"subscription_ack","channel":"` + channel + `"}`)
+					ack := []byte(`{"type":"subscription_ack","symbol":"` + symbol + `"}`)
 					if err := conn.WriteMessage(mt, ack); err != nil {
 						log.Printf("ack error: %v", err)
 					}
-					ensureChannelDispatcher(shard, channel) // 确保启动分发 goroutine
+					ensureSymbolDispatcher(shard, symbol)
 					continue
 				}
-				if action == "unsubscribe" && channel != "" {
-					shard := GetShard(channel)
+				if action == "unsubscribe" && symbol != "" {
+					shard := GetSymbolShard(symbol)
 					shard.Mu.Lock()
-					if conns, ok := shard.Subs[channel]; ok {
+					if conns, ok := shard.Subs[symbol]; ok {
 						delete(conns, conn)
 						if len(conns) == 0 {
-							delete(shard.Subs, channel)
+							delete(shard.Subs, symbol)
 						}
 					}
 					shard.Mu.Unlock()
-					ack := []byte(`{"type":"unsubscription_ack","channel":"` + channel + `"}`)
+					ack := []byte(`{"type":"unsubscription_ack","symbol":"` + symbol + `"}`)
 					if err := conn.WriteMessage(mt, ack); err != nil {
 						log.Printf("ack error: %v", err)
 					}
 					continue
 				}
 				// 其他 action 处理，例如 publish/SubmitOrder
+				if action == "submit_order" {
+					var order model.SubmitOrderMsg
+					if err := json.Unmarshal(msg, &order); err != nil {
+						log.Printf("invalid submit_order: %v", err)
+						continue
+					}
+					if matchEngine != nil {
+						matchEngine.SubmitOrder(order)
+					}
+					ack := []byte(`{"type":"order_ack","symbol":"` + order.Pair + `"}`)
+					if err := conn.WriteMessage(mt, ack); err != nil {
+						log.Printf("order ack error: %v", err)
+					}
+					continue
+				}
 			}
 		})
 		if err != nil {
@@ -338,4 +351,26 @@ func NewWebSocketServer(addr string) *server.Hertz {
 	})
 
 	return h
+}
+
+// 用户ID到连接的映射
+var userConnMap sync.Map // map[userID]*websocket.Conn
+
+// RegisterUserConn 注册用户和连接的关系（需在用户登录或鉴权后调用）
+func RegisterUserConn(userID string, conn *websocket.Conn) {
+	userConnMap.Store(userID, conn)
+}
+
+// UnregisterUserConn 断开连接时清理
+func UnregisterUserConn(userID string) {
+	userConnMap.Delete(userID)
+}
+
+// Unicast 单播消息到指定 userID
+func Unicast(userID string, msg []byte) {
+	if v, ok := userConnMap.Load(userID); ok {
+		if conn, ok := v.(*websocket.Conn); ok {
+			_ = conn.WriteMessage(websocket.TextMessage, msg)
+		}
+	}
 }

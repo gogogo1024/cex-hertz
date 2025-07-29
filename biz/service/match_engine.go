@@ -1,22 +1,30 @@
+// Engine 接口定义
 package service
 
 import (
 	"bytes"
 	"cex-hertz/biz/dal/redis"
+	"cex-hertz/biz/engine"
 	"cex-hertz/biz/model"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 	"math/rand"
 	"net/http"
 	"sync"
 	"time"
-
-	"cex-hertz/server"
-	"github.com/cloudwego/hertz/pkg/common/hlog"
 )
+
+// 撮合引擎接口
+// 你可以根据实际需要扩展更多方法
+
+type Engine interface {
+	SubmitOrder(order model.SubmitOrderMsg)
+	// ...其他方法...
+}
 
 // 撮合引擎接口
 // 实际业务可扩展为分 pair 的撮合线程池
@@ -25,10 +33,11 @@ type MatchEngine struct {
 	// 每个交易对一个撮合队列
 	orderQueues map[string]chan model.SubmitOrderMsg
 	mu          sync.RWMutex
+	broadcaster engine.Broadcaster
+	unicaster   engine.Unicaster
 }
 
 var (
-	Engine       = NewMatchEngine()
 	consulHelper *ConsulHelper
 )
 
@@ -40,9 +49,11 @@ var (
 	storeMu      sync.RWMutex
 )
 
-func NewMatchEngine() *MatchEngine {
+func NewMatchEngine(broadcaster engine.Broadcaster, unicaster engine.Unicaster) *MatchEngine {
 	return &MatchEngine{
 		orderQueues: make(map[string]chan model.SubmitOrderMsg),
+		broadcaster: broadcaster,
+		unicaster:   unicaster,
 	}
 }
 
@@ -96,7 +107,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 	orderBook := NewOrderBook(pair)
 	engineID := "node-1" // 可通过配置或环境变量设置
 	hlog.Infof("撮合线程启动, pair=%s, engine_id=%s", pair, engineID)
-	var lastSnapshot *OrderBookSnapshot = &OrderBookSnapshot{Bids: map[string]string{}, Asks: map[string]string{}}
+	var lastSnapshot = &OrderBookSnapshot{Bids: map[string]string{}, Asks: map[string]string{}}
 	for order := range queue {
 		hlog.Infof("撮合订单, order_id=%s, pair=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Pair, order.Side, order.Price, order.Quantity)
 		trades, filled := orderBook.Match(order)
@@ -143,9 +154,16 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 				}
 				msg, err := json.Marshal(result)
 				if err == nil {
-					Broadcast(pair, msg)
+					m.broadcaster(pair, msg)
+					// 单播给撮合双方
+					if trade.TakerUser != "" {
+						m.unicaster(trade.TakerUser, msg)
+					}
+					if trade.MakerUser != "" && trade.MakerUser != trade.TakerUser {
+						m.unicaster(trade.MakerUser, msg)
+					}
 				}
-				// 持久化�� Kafka
+				// 持久化到 Kafka
 				saveTradeToKafka(trade)
 				// 持久化到 PostgreSQL
 				saveTradeToDB(trade)
@@ -185,7 +203,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 			}
 			msg, err := json.Marshal(result)
 			if err == nil {
-				Broadcast(pair, msg)
+				m.broadcaster(pair, msg)
 			}
 
 			// 增量快照推送
@@ -209,7 +227,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 				}
 				deltaMsg, err := json.Marshal(deltaResult)
 				if err == nil {
-					Broadcast(pair, deltaMsg)
+					m.broadcaster(pair, deltaMsg)
 				}
 			}
 			// 新 lastSnapshot
@@ -250,10 +268,6 @@ func minFloat(a, b float64) float64 {
 		return a
 	}
 	return b
-}
-
-func Broadcast(channel string, msg []byte) {
-	server.Broadcast(channel, msg)
 }
 
 var (
@@ -578,3 +592,5 @@ func (m *MatchEngine) CancelOrder(orderID, userID string) (string, error) {
 	}
 	return "cancelled", nil
 }
+
+// 在撮合成功、订单状态变化等需要单播时调用 m.unicaster(userID, msg)

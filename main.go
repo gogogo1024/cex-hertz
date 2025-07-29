@@ -8,6 +8,7 @@ import (
 	"cex-hertz/biz/service"
 	"cex-hertz/biz/util"
 	"cex-hertz/conf"
+	rootHandler "cex-hertz/handler"
 	"cex-hertz/middleware"
 	cexserver "cex-hertz/server"
 	"context"
@@ -67,6 +68,18 @@ func main() {
 	if err := service.InitMatchEngineWithHelper(consulHelper, nodeID, pairs, matchPort); err != nil {
 		panic(err)
 	}
+
+	// 注入撮合引擎的广播和单播回调
+	broadcaster := func(symbol string, msg []byte) {
+		cexserver.Broadcast(symbol, msg)
+	}
+	unicast := func(userID string, msg []byte) {
+		cexserver.Unicast(userID, msg)
+	}
+	matchEngine := service.NewMatchEngine(broadcaster, unicast)
+	// 注入全局 handler 层撮合引擎实例，避免循环依赖
+	rootHandler.SetEngine(matchEngine)
+	cexserver.InjectEngine(matchEngine)
 
 	// 启动基于 Consul 分布式锁的 K 线补偿定时任务
 	if consulHelper.Client() != nil {

@@ -12,11 +12,19 @@ import (
 
 // ConnContext 连接上下文，后续可扩展
 // 可挂载到 netpoll.Connection   Context
-// 包含订阅频道等信息
+// 包含订阅symbol等信息
 
 type ConnContext struct {
-	Conn     netpoll.Connection
-	Channels map[string]struct{} // 已订阅频道
+	Conn    netpoll.Connection
+	Symbols map[string]struct{} // 已订阅symbol
+}
+
+// 全局撮合引擎实例（避免循环依赖）
+var engineInstance service.Engine
+
+// SetEngine 注入撮合引擎实例
+func SetEngine(e service.Engine) {
+	engineInstance = e
 }
 
 // OnMessage 处理收到的 WebSocket 消息
@@ -28,22 +36,22 @@ func OnMessage(ctx *ConnContext, data []byte) {
 	}
 
 	action, _ := msg["action"].(string)
-	channel, _ := msg["channel"].(string)
+	symbol, _ := msg["symbol"].(string)
 
 	switch action {
 	case "subscribe":
-		if channel != "" {
-			ctx.Channels[channel] = struct{}{}
+		if symbol != "" {
+			ctx.Symbols[symbol] = struct{}{}
 			ack := map[string]interface{}{
-				"type":    "subscription_ack",
-				"channel": channel,
+				"type":   "subscription_ack",
+				"symbol": symbol,
 			}
 			ackBytes, _ := json.Marshal(ack)
 			ctx.Conn.Write(ackBytes)
 		}
 	case "unsubscribe":
-		if channel != "" {
-			delete(ctx.Channels, channel)
+		if symbol != "" {
+			delete(ctx.Symbols, symbol)
 		}
 	case "SubmitOrder":
 		var order model.SubmitOrderMsg
@@ -61,7 +69,7 @@ func OnMessage(ctx *ConnContext, data []byte) {
 			return
 		}
 		// 分布式路由逻辑已由中间件处理，这里只需本地撮合
-		service.Engine.SubmitOrder(order)
+		engineInstance.SubmitOrder(order)
 		resp := map[string]interface{}{
 			"type":     "order_ack",
 			"order_id": order.OrderID,
@@ -74,15 +82,15 @@ func OnMessage(ctx *ConnContext, data []byte) {
 		// 撮合结果推送（示例，实际应由撮合引擎回调，这里演示直接广播）
 		// 假设撮合结果如下：
 		matchResult := map[string]interface{}{
-			"channel": order.Pair,
-			"type":    "match_result",
+			"symbol": order.Pair,
+			"type":   "match_result",
 			"data": map[string]interface{}{
 				"order_id": order.OrderID,
 				"status":   "matched",
 			},
 		}
 		matchBytes, _ := json.Marshal(matchResult)
-		// 广播到频道
+		// 广播到symbol
 		importServerBroadcast(order.Pair, matchBytes)
 	default:
 		log.Printf("unknown action: %s", action)
@@ -91,28 +99,28 @@ func OnMessage(ctx *ConnContext, data []byte) {
 
 // OnClose 连接关闭时清理资源
 func OnClose(ctx *ConnContext) {
-	for channel := range ctx.Channels {
-		importServerUnsubscribe(channel, ctx.Conn)
+	for symbol := range ctx.Symbols {
+		importServerUnsubscribe(symbol, ctx.Conn)
 	}
-	ctx.Channels = nil
+	ctx.Symbols = nil
 }
 
 // --- 与 server/websocket_server.go 对接 ---
-// importServerBroadcast 调用 server 层频道广播
-func importServerBroadcast(channel string, msg []byte) {
-	server.Broadcast(channel, msg)
+// importServerBroadcast 调用 server 层symbol广播
+func importServerBroadcast(symbol string, msg []byte) {
+	server.Broadcast(symbol, msg)
 }
 
-// importServerUnsubscribe 退订频道
-func importServerUnsubscribe(channel string, conn netpoll.Connection) {
+// importServerUnsubscribe 退订symbol
+func importServerUnsubscribe(symbol string, conn netpoll.Connection) {
 	// 需要将 netpoll.Connection 转换为 *websocket.Conn
 	if wsConn, ok := getWebSocketConn(conn); ok {
-		shard := server.GetShard(channel)
+		shard := server.GetSymbolShard(symbol)
 		shard.Mu.Lock()
-		if conns, ok := shard.Subs[channel]; ok {
+		if conns, ok := shard.Subs[symbol]; ok {
 			delete(conns, wsConn)
 			if len(conns) == 0 {
-				delete(shard.Subs, channel)
+				delete(shard.Subs, symbol)
 			}
 		}
 		shard.Mu.Unlock()
