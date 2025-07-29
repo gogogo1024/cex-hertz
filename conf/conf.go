@@ -78,15 +78,13 @@
 package conf
 
 import (
-	"io/ioutil"
+	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/kr/pretty"
-	"gopkg.in/validator.v2"
-	"gopkg.in/yaml.v2"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -95,57 +93,57 @@ var (
 )
 
 type Config struct {
-	Env         string
-	Hertz       Hertz       `yaml:"hertz"`
-	MySQL       MySQL       `yaml:"mysql"`
-	Redis       Redis       `yaml:"redis"`
-	Postgres    Postgres    `yaml:"postgres"`
-	Kafka       Kafka       `yaml:"kafka"`
-	MatchEngine MatchEngine `yaml:"match_engine"`
-	Registry    Registry    `yaml:"registry"`
+	Env         string      `mapstructure:"env" yaml:"env"`
+	Hertz       Hertz       `mapstructure:"hertz" yaml:"hertz"`
+	MySQL       MySQL       `mapstructure:"mysql" yaml:"mysql"`
+	Redis       Redis       `mapstructure:"redis" yaml:"redis"`
+	Postgres    Postgres    `mapstructure:"postgres" yaml:"postgres"`
+	Kafka       Kafka       `mapstructure:"kafka" yaml:"kafka"`
+	MatchEngine MatchEngine `mapstructure:"match_engine" yaml:"match_engine"`
+	Registry    Registry    `mapstructure:"registry" yaml:"registry"`
 }
 
 type MySQL struct {
-	DSN string `yaml:"dsn"`
+	DSN string `mapstructure:"dsn" yaml:"dsn"`
 }
 
 type Redis struct {
-	Address  string `yaml:"address"`
-	Password string `yaml:"password"`
-	Username string `yaml:"username"`
-	DB       int    `yaml:"db"`
+	Address  string `mapstructure:"address" yaml:"address"`
+	Password string `mapstructure:"password" yaml:"password"`
+	Username string `mapstructure:"username" yaml:"username"`
+	DB       int    `mapstructure:"db" yaml:"db"`
 }
 type Postgres struct {
-	DSN string `yaml:"dsn"`
+	DSN string `mapstructure:"dsn" yaml:"dsn"`
 }
 type Kafka struct {
-	Brokers []string `yaml:"brokers"`
-	Topic   string   `yaml:"topic"`
+	Brokers []string `mapstructure:"brokers" yaml:"brokers"`
+	Topic   string   `mapstructure:"topic" yaml:"topic"`
 }
 type Registry struct {
-	RegistryAddress []string `yaml:"registry_address"`
-	Username        string   `yaml:"username"`
-	Password        string   `yaml:"password"`
+	RegistryAddress []string `mapstructure:"registry_address" yaml:"registry_address"`
+	Username        string   `mapstructure:"username" yaml:"username"`
+	Password        string   `mapstructure:"password" yaml:"password"`
 }
 type MatchEngine struct {
-	NodeID     string `yaml:"node_id"`
-	MatchPairs string `yaml:"match_pairs"`
-	MatchPort  int    `yaml:"match_port"`
+	NodeID     string `mapstructure:"node_id" yaml:"node_id"`
+	MatchPairs string `mapstructure:"match_pairs" yaml:"match_pairs"`
+	MatchPort  int    `mapstructure:"match_port" yaml:"match_port"`
 }
 type Hertz struct {
-	Service         string `yaml:"service"`
-	Address         string `yaml:"address"`
-	EnablePprof     bool   `yaml:"enable_pprof"`
-	EnableGzip      bool   `yaml:"enable_gzip"`
-	EnableAccessLog bool   `yaml:"enable_access_log"`
-	LogLevel        string `yaml:"log_level"`
-	LogFileName     string `yaml:"log_file_name"`
-	LogMaxSize      int    `yaml:"log_max_size"`
-	LogMaxBackups   int    `yaml:"log_max_backups"`
-	LogMaxAge       int    `yaml:"log_max_age"`
-	RegistryAddr    string `yaml:"registry_addr"`
-	MetricsPort     string `yaml:"metrics_port"`
-	WsPort          string `yaml:"ws_port"`
+	Service         string `mapstructure:"service" yaml:"service"`
+	Address         string `mapstructure:"address" yaml:"address"`
+	EnablePprof     bool   `mapstructure:"enable_pprof" yaml:"enable_pprof"`
+	EnableGzip      bool   `mapstructure:"enable_gzip" yaml:"enable_gzip"`
+	EnableAccessLog bool   `mapstructure:"enable_access_log" yaml:"enable_access_log"`
+	LogLevel        string `mapstructure:"log_level" yaml:"log_level"`
+	LogFileName     string `mapstructure:"log_file_name" yaml:"log_file_name"`
+	LogMaxSize      int    `mapstructure:"log_max_size" yaml:"log_max_size"`
+	LogMaxBackups   int    `mapstructure:"log_max_backups" yaml:"log_max_backups"`
+	LogMaxAge       int    `mapstructure:"log_max_age" yaml:"log_max_age"`
+	RegistryAddr    string `mapstructure:"registry_addr" yaml:"registry_addr"`
+	MetricsPort     string `mapstructure:"metrics_port" yaml:"metrics_port"`
+	WsPort          string `mapstructure:"ws_port" yaml:"ws_port"`
 }
 
 // GetConf gets configuration instance
@@ -155,35 +153,37 @@ func GetConf() *Config {
 }
 
 func initConf() {
-	prefix := "conf"
-	confFileRelPath := filepath.Join(prefix, filepath.Join(GetEnv(), "conf.yaml"))
-	content, err := ioutil.ReadFile(confFileRelPath)
-	if err != nil {
-		panic(err)
+	v := viper.New()
+	// 优先读取 GO_ENV 环境变量
+	env := os.Getenv("GO_ENV")
+	if env == "" {
+		env = "test"
 	}
+	v.SetConfigName("conf") // 不带扩展名
+	v.SetConfigType("yaml")
+	v.AutomaticEnv()
 
-	conf = new(Config)
-	err = yaml.Unmarshal(content, conf)
-	if err != nil {
-		hlog.Error("parse yaml error - %v", err)
-		panic(err)
+	//// 支持多路径查找，兼容 IDE/workspace
+	//v.AddConfigPath(fmt.Sprintf("conf/%s", env))    // conf/test/
+	//v.AddConfigPath(fmt.Sprintf("../conf/%s", env)) // ../conf/test/
+	//v.AddConfigPath(".")                            // 当前目录
+	//v.AddConfigPath("..")                           // 上级目录
+	//// 新增：项目根目录的 conf/test
+	//projectRoot, _ := os.Getwd()
+	//for i := 0; i < 5; i++ { // 最多向上5级
+	//	confPath := filepath.Join(projectRoot, strings.Repeat("../", i), "conf", env)
+	//	v.AddConfigPath(confPath)
+	//}
+	if err := v.ReadInConfig(); err != nil {
+		panic(fmt.Sprintf("读取配置文件失败: %v", err))
 	}
-	if err := validator.Validate(conf); err != nil {
-		hlog.Error("validate config error - %v", err)
-		panic(err)
+	var c Config
+	if err := v.Unmarshal(&c); err != nil {
+		panic(fmt.Sprintf("配置文件解析失败: %v", err))
 	}
-
-	conf.Env = GetEnv()
-
+	c.Env = env
+	conf = &c
 	pretty.Printf("%+v\n", conf)
-}
-
-func GetEnv() string {
-	e := os.Getenv("GO_ENV")
-	if len(e) == 0 {
-		return "test"
-	}
-	return e
 }
 
 func LogLevel() hlog.Level {
