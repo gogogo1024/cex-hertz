@@ -45,13 +45,13 @@ func NewConsulHelperWithAddrs(addrs []string) (*ConsulHelper, error) {
 }
 
 // RegisterMatchEngine 注册撮合引擎服务到 Consul
-// nodeID: 唯一节点ID，pairs: 该节点负责的交易对列表
-func (c *ConsulHelper) RegisterMatchEngine(nodeID string, pairs []string, port int) error {
+// nodeID: 唯一节点ID，symbols: 该节点负责的交易对列表
+func (c *ConsulHelper) RegisterMatchEngine(nodeID string, symbols []string, port int) error {
 	reg := &api.AgentServiceRegistration{
 		ID:   nodeID,
 		Name: "match_engine",
 		Port: port,
-		Tags: pairs,
+		Tags: symbols,
 		Check: &api.AgentServiceCheck{
 			TCP:      fmt.Sprintf("127.0.0.1:%d", port),
 			Interval: "10s",

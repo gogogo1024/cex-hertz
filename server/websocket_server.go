@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"cex-hertz/biz/engine"
 	"cex-hertz/biz/model"
+	"cex-hertz/biz/util"
 	"cex-hertz/conf"
+	"cex-hertz/middleware"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -279,13 +281,23 @@ func InjectEngine(e engine.Engine) {
 func NewWebSocketServer(addr string) *server.Hertz {
 	h := server.Default(server.WithHostPorts(addr))
 	h.NoHijackConnPool = true
-	h.GET("/ws", func(_ context.Context, c *app.RequestContext) {
+
+	h.GET("/ws", func(ctx context.Context, c *app.RequestContext) {
+		log.Printf("[WS] /ws handler called, path=%s, method=%s", c.Path(), c.Request.Method())
+		// 分布式路由中间件逻辑迁移到ws
+		middleware.DistributedRouteMiddleware()(ctx, c)
+		if c.IsAborted() {
+			log.Printf("[WS] connection aborted by DistributedRouteMiddleware, path=%s", c.Path())
+			return
+		}
 		err := upgrader.Upgrade(c, func(conn *websocket.Conn) {
+			log.Printf("[WS] connection upgraded: %v", conn.RemoteAddr())
 			defer func() {
 				cleanConnFromAllSymbols(conn)
 				if err := conn.Close(); err != nil {
 					log.Printf("close error: %v", err)
 				}
+				log.Printf("[WS] connection closed: %v", conn.RemoteAddr())
 			}()
 
 			for {
@@ -294,9 +306,12 @@ func NewWebSocketServer(addr string) *server.Hertz {
 					log.Printf("read error: %v", err)
 					break
 				}
+				log.Printf("[WS] received message: %s", string(msg))
 
 				action, symbol := parseAction(msg)
+				log.Printf("[WS] parsed action=%s, symbol=%s", action, symbol)
 				if action == "subscribe" && symbol != "" {
+					log.Printf("[WS] subscribe action for symbol=%s", symbol)
 					shard := GetSymbolShard(symbol)
 					shard.Mu.Lock()
 					if shard.Subs[symbol] == nil {
@@ -312,6 +327,7 @@ func NewWebSocketServer(addr string) *server.Hertz {
 					continue
 				}
 				if action == "unsubscribe" && symbol != "" {
+					log.Printf("[WS] unsubscribe action for symbol=%s", symbol)
 					shard := GetSymbolShard(symbol)
 					shard.Mu.Lock()
 					if conns, ok := shard.Subs[symbol]; ok {
@@ -327,17 +343,26 @@ func NewWebSocketServer(addr string) *server.Hertz {
 					}
 					continue
 				}
-				// 其他 action 处理，例如 publish/SubmitOrder
-				if action == "submit_order" {
+				if action == "SubmitOrder" {
+					log.Printf("[WS] SubmitOrder action, msg=%s", string(msg))
 					var order model.SubmitOrderMsg
 					if err := json.Unmarshal(msg, &order); err != nil {
-						log.Printf("invalid submit_order: %v", err)
+						log.Printf("invalid SubmitOrder: %v", err)
+						continue
+					}
+					if !util.IsLocalMatchEngine(symbol) {
+						log.Printf("[WS] SubmitOrder: symbol %s not local, should forward or reject", symbol)
+						ack := []byte(`{"type":"order_forwarded","symbol":"` + symbol + `"}`)
+						if err := conn.WriteMessage(mt, ack); err != nil {
+							log.Printf("order forward ack error: %v", err)
+						}
 						continue
 					}
 					if matchEngine != nil {
+						log.Printf("[WS] calling matchEngine.SubmitOrder for symbol=%s", symbol)
 						matchEngine.SubmitOrder(order)
 					}
-					ack := []byte(`{"type":"order_ack","symbol":"` + order.Pair + `"}`)
+					ack := []byte(`{"type":"order_ack","symbol":"` + symbol + `"}`)
 					if err := conn.WriteMessage(mt, ack); err != nil {
 						log.Printf("order ack error: %v", err)
 					}

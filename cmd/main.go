@@ -19,7 +19,7 @@ func main() {
 	//service.InitKafkaWriter(cfg.KafkaBrokers, cfg.KafkaTopic)
 	//
 	//// 初始化 Consul 并注册撮合引擎节点
-	//if err := service.InitMatchEngine(cfg.ConsulAddr, cfg.NodeID, cfg.MatchPairs, cfg.MatchPort); err != nil {
+	//if err := service.InitMatchEngine(cfg.ConsulAddr, cfg.NodeID, cfg.Matchsymbols, cfg.MatchPort); err != nil {
 	//	log.Fatalf("Consul注册撮合引擎失败: %v", err)
 	//}
 

@@ -7,7 +7,7 @@ import (
 // Trade 成交模型（GORM）
 type Trade struct {
 	TradeID      string         `gorm:"primaryKey;column:trade_id" json:"trade_id"`
-	Pair         string         `gorm:"column:pair" json:"pair"`
+	Symbol       string         `gorm:"column:symbol" json:"symbol"`
 	Price        string         `gorm:"column:price" json:"price"`
 	Quantity     string         `gorm:"column:quantity" json:"quantity"`
 	Timestamp    int64          `gorm:"column:timestamp" json:"timestamp"`

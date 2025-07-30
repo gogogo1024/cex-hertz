@@ -36,5 +36,5 @@ kafka:
   topic: "trades"
 match_engine:
   node_id: "node-1"
-  match_pairs: "BTCUSDT,ETHUSDT"
+  match_symbols: "BTCUSDT,ETHUSDT"
   match_port: 9997

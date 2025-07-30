@@ -14,7 +14,7 @@
 //		WebSocketAddr string
 //		ConsulAddr    string
 //		NodeID        string
-//		MatchPairs    []string
+//		Matchsymbols    []string
 //		MatchPort     int
 //	}
 //
@@ -26,13 +26,13 @@
 //			WebSocketAddr: getEnv("CEX_WS_ADDR", ":8080"),
 //			ConsulAddr:    getEnv("CEX_CONSUL_ADDR", "127.0.0.1:8500"),
 //			NodeID:        getEnv("CEX_NODE_ID", "node-1"),
-//			MatchPairs:    parsePairs(getEnv("CEX_MATCH_PAIRS", "BTCUSDT,ETHUSDT")),
+//			Matchsymbols:    parsesymbols(getEnv("CEX_MATCH_symbolS", "BTCUSDT,ETHUSDT")),
 //			MatchPort:     getEnvInt("CEX_MATCH_PORT", 9000),
 //		}
 //		return cfg
 //	}
 //
-//	func parsePairs(s string) []string {
+//	func parsesymbols(s string) []string {
 //		var res []string
 //		for _, p := range splitAndTrim(s, ",") {
 //			if p != "" {
@@ -126,9 +126,9 @@ type Registry struct {
 	Password        string   `mapstructure:"password" yaml:"password"`
 }
 type MatchEngine struct {
-	NodeID     string `mapstructure:"node_id" yaml:"node_id"`
-	MatchPairs string `mapstructure:"match_pairs" yaml:"match_pairs"`
-	MatchPort  int    `mapstructure:"match_port" yaml:"match_port"`
+	NodeID       string `mapstructure:"node_id" yaml:"node_id"`
+	Matchsymbols string `mapstructure:"match_symbols" yaml:"match_symbols"`
+	MatchPort    int    `mapstructure:"match_port" yaml:"match_port"`
 }
 type Hertz struct {
 	Service         string `mapstructure:"service" yaml:"service"`

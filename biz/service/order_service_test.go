@@ -49,7 +49,7 @@ func TestCreateOrder(t *testing.T) {
 	order := &model.Order{
 		OrderID:   "order2",
 		UserID:    "user2",
-		Pair:      "BTCUSDT",
+		Symbol:    "BTCUSDT",
 		Side:      "sell",
 		Price:     "20000",
 		Quantity:  "2",

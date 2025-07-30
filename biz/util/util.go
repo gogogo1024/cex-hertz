@@ -12,7 +12,7 @@ func IsLocalMatchEngine(symbol string) bool {
 
 // isLocalSymbol 判断 symbol 是否属于本节点
 func isLocalSymbol(symbol string, cfg *conf.Config) bool {
-	for _, p := range ParsePairs(cfg.MatchEngine.MatchPairs) {
+	for _, p := range Parsesymbols(cfg.MatchEngine.Matchsymbols) {
 		if p == symbol {
 			return true
 		}
@@ -20,8 +20,8 @@ func isLocalSymbol(symbol string, cfg *conf.Config) bool {
 	return false
 }
 
-// ParsePairs 工具函数，解析逗号分隔的交易对字符串
-func ParsePairs(s string) []string {
+// Parsesymbols 工具函数，解析逗号分隔的交易对字符串
+func Parsesymbols(s string) []string {
 	var res []string
 	for _, p := range splitAndTrim(s, ",") {
 		if p != "" {

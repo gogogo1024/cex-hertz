@@ -14,9 +14,9 @@ import (
 
 // GetDepth 获取深度（订单簿快照）
 func GetDepth(c context.Context, ctx *app.RequestContext) {
-	pair := string(ctx.Query("pair"))
-	if pair == "" {
-		ctx.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "pair参数不能为空"})
+	symbol := string(ctx.Query("symbol"))
+	if symbol == "" {
+		ctx.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "symbol参数不能为空"})
 		return
 	}
 	// 分别获取买卖档数
@@ -44,7 +44,7 @@ func GetDepth(c context.Context, ctx *app.RequestContext) {
 	bidsAgg := make(map[string]*depthItem)
 	asksAgg := make(map[string]*depthItem)
 	for _, o := range orders {
-		if o.Pair != pair {
+		if o.Symbol != symbol {
 			continue
 		}
 		qty, err := strconv.ParseFloat(o.Quantity, 64)
@@ -102,7 +102,7 @@ func GetDepth(c context.Context, ctx *app.RequestContext) {
 		asks = asks[:askLimit]
 	}
 	ctx.JSON(consts.StatusOK, map[string]interface{}{
-		"pair":      pair,
+		"symbol":    symbol,
 		"bids":      bids,
 		"asks":      asks,
 		"bid_limit": bidLimit,
@@ -112,7 +112,7 @@ func GetDepth(c context.Context, ctx *app.RequestContext) {
 
 // GetTrades 获取最新成交
 func GetTrades(c context.Context, ctx *app.RequestContext) {
-	pair := string(ctx.Query("pair"))
+	symbol := string(ctx.Query("symbol"))
 	limitStr := string(ctx.Query("limit"))
 	limit := 50
 	if limitStr != "" {
@@ -120,30 +120,30 @@ func GetTrades(c context.Context, ctx *app.RequestContext) {
 			limit = l
 		}
 	}
-	trades, _ := pg.ListTrades(pair, limit)
+	trades, _ := pg.ListTrades(symbol, limit)
 	ctx.JSON(consts.StatusOK, map[string]interface{}{
-		"pair":   pair,
+		"symbol": symbol,
 		"trades": trades,
 	})
 }
 
 // GetTicker 获取ticker（最新价、24h量等）
 func GetTicker(c context.Context, ctx *app.RequestContext) {
-	pair := string(ctx.Query("pair"))
-	trades, _ := pg.ListTrades(pair, 1)
+	symbol := string(ctx.Query("symbol"))
+	trades, _ := pg.ListTrades(symbol, 1)
 	var lastPrice string
 	if len(trades) > 0 {
 		lastPrice = trades[0].Price
 	}
 	ctx.JSON(consts.StatusOK, map[string]interface{}{
-		"pair":       pair,
+		"symbol":     symbol,
 		"last_price": lastPrice,
 	})
 }
 
 // GetKline 获取K线数据（简单示例，实际应从聚合表或缓存获取）
 func GetKline(c context.Context, ctx *app.RequestContext) {
-	pair := string(ctx.Query("pair"))
+	symbol := string(ctx.Query("symbol"))
 	period := string(ctx.Query("period"))
 	limitStr := string(ctx.Query("limit"))
 	limit := 100
@@ -152,12 +152,12 @@ func GetKline(c context.Context, ctx *app.RequestContext) {
 			limit = l
 		}
 	}
-	if pair == "" || period == "" {
-		ctx.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "pair和period参数不能为空"})
+	if symbol == "" || period == "" {
+		ctx.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "symbol和period参数不能为空"})
 		return
 	}
 	// 1. 优先查 Redis
-	redisKey := "kline:" + pair + ":" + period
+	redisKey := "kline:" + symbol + ":" + period
 	klineData, err := redis.RedisClient.LRange(c, redisKey, int64(-limit), -1).Result()
 	if err == nil && len(klineData) > 0 {
 		var klines []model.Kline
@@ -168,7 +168,7 @@ func GetKline(c context.Context, ctx *app.RequestContext) {
 			}
 		}
 		ctx.JSON(consts.StatusOK, map[string]interface{}{
-			"pair":   pair,
+			"symbol": symbol,
 			"period": period,
 			"kline":  klines,
 		})
@@ -177,14 +177,14 @@ func GetKline(c context.Context, ctx *app.RequestContext) {
 	// 2. 查数据库聚合表
 	var klines []model.Kline
 	db := pg.GormDB
-	db.Where("pair = ? AND period = ?", pair, period).
+	db.Where("symbol = ? AND period = ?", symbol, period).
 		Order("timestamp desc").Limit(limit).Find(&klines)
 	// 逆序
 	for i, j := 0, len(klines)-1; i < j; i, j = i+1, j-1 {
 		klines[i], klines[j] = klines[j], klines[i]
 	}
 	ctx.JSON(consts.StatusOK, map[string]interface{}{
-		"pair":   pair,
+		"symbol": symbol,
 		"period": period,
 		"kline":  klines,
 	})

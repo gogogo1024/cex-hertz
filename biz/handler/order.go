@@ -4,6 +4,7 @@ import (
 	"cex-hertz/biz/dal/pg"
 	"cex-hertz/biz/model"
 	"cex-hertz/biz/service"
+	"cex-hertz/util"
 	"context"
 	"fmt"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -12,7 +13,7 @@ import (
 
 type SubmitOrderRequest struct {
 	OrderID  string `json:"order_id"`
-	Pair     string `json:"pair"`
+	symbol   string `json:"symbol"`
 	Side     string `json:"side"`
 	Price    string `json:"price"`
 	Quantity string `json:"quantity"`
@@ -21,7 +22,7 @@ type SubmitOrderRequest struct {
 type SubmitOrderResponse struct {
 	Type    string `json:"type"`
 	OrderID string `json:"order_id"`
-	Pair    string `json:"pair"`
+	symbol  string `json:"symbol"`
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
 }
@@ -33,10 +34,17 @@ func SubmitOrder(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 		return
 	}
-	if req.OrderID == "" || req.Pair == "" || req.Side == "" || req.Price == "" || req.Quantity == "" || req.UserID == "" {
+	if req.Symbol == "" || req.Side == "" || req.Price == "" || req.Quantity == "" || req.UserID == "" {
 		c.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "missing required fields"})
 		return
 	}
+	// 后端生成 OrderID
+	id, err := util.GenerateOrderID()
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, map[string]interface{}{"error": "failed to generate order_id"})
+		return
+	}
+	req.OrderID = fmt.Sprintf("%d", id)
 	req.Status = "active"
 	req.UpdatedAt = req.CreatedAt
 	if err := service.CreateOrder(&req); err != nil {
@@ -94,12 +102,12 @@ func CancelOrder(ctx context.Context, c *app.RequestContext) {
 
 // 查询成交记录（GORM）
 func ListTrades(ctx context.Context, c *app.RequestContext) {
-	pair := string(c.Query("pair"))
+	symbol := string(c.Query("symbol"))
 	limit := 50
 	if l := c.Query("limit"); len(l) > 0 {
 		fmt.Sscanf(string(l), "%d", &limit)
 	}
-	trades, err := pg.ListTrades(pair, limit)
+	trades, err := pg.ListTrades(symbol, limit)
 	if err != nil {
 		c.JSON(consts.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 		return

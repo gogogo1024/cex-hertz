@@ -65,13 +65,13 @@ func CompensateKline() error {
 	tradeService := NewTradeService()
 
 	// 查询该时间段内所有有成交的交易对
-	pairs, err := tradeService.GetActivePairs(start, end)
+	symbols, err := tradeService.GetActivesymbols(start, end)
 	if err != nil {
 		hlog.Warnf("获取活跃交易对失败: %v", err)
 		return err
 	}
-	for _, pair := range pairs {
-		trades, err := tradeService.GetTradesByPairAndTime(pair, start, end)
+	for _, symbol := range symbols {
+		trades, err := tradeService.GetTradesBysymbolAndTime(symbol, start, end)
 		if err != nil || len(trades) == 0 {
 			continue
 		}
@@ -94,7 +94,7 @@ func CompensateKline() error {
 			volume += qty
 		}
 		kline := model.Kline{
-			Pair:      pair,
+			Symbol:    symbol,
 			Period:    "1m",
 			Timestamp: start.Unix(),
 			Open:      open,
@@ -105,7 +105,7 @@ func CompensateKline() error {
 		}
 		err = pg.UpsertKline(&kline)
 		if err != nil {
-			hlog.Errorf("K线 upsert 失败: %v, pair=%s, ts=%d", err, pair, start.Unix())
+			hlog.Errorf("K线 upsert 失败: %v, symbol=%s, ts=%d", err, symbol, start.Unix())
 		}
 
 	}

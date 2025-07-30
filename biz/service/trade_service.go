@@ -13,12 +13,12 @@ func NewTradeService() *TradeService {
 	return &TradeService{}
 }
 
-// GetTradesByPairAndTime 查询某交易对在指定时间段的成交数据
-func (s *TradeService) GetTradesByPairAndTime(pair string, start, end time.Time) ([]model.Trade, error) {
-	return pg.QueryTradesByPairAndTime(pair, start, end)
+// GetTradesBysymbolAndTime 查询某交易对在指定时间段的成交数据
+func (s *TradeService) GetTradesBysymbolAndTime(symbol string, start, end time.Time) ([]model.Trade, error) {
+	return pg.QueryTradesBysymbolAndTime(symbol, start, end)
 }
 
-// GetActivePairs 查询指定时间段内有成交的所有交易对
-func (s *TradeService) GetActivePairs(start, end time.Time) ([]string, error) {
-	return pg.GetActiveTradePairs(start, end)
+// GetActivesymbols 查询指定时间段内有成交的所有交易对
+func (s *TradeService) GetActivesymbols(start, end time.Time) ([]string, error) {
+	return pg.GetActiveTradesymbols(start, end)
 }

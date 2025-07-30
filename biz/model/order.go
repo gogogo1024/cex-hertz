@@ -7,7 +7,7 @@ import (
 // SubmitOrderMsg 订单结构体（与 handler 保持一致）
 type SubmitOrderMsg struct {
 	OrderID  string
-	Pair     string
+	Symbol   string
 	Side     string
 	Price    string
 	Quantity string
@@ -18,7 +18,7 @@ type SubmitOrderMsg struct {
 type Order struct {
 	OrderID   string         `gorm:"primaryKey;column:order_id" json:"order_id"`
 	UserID    string         `gorm:"column:user_id" json:"user_id"`
-	Pair      string         `gorm:"column:pair" json:"pair"`
+	Symbol    string         `gorm:"column:symbol" json:"symbol"`
 	Side      string         `gorm:"column:side" json:"side"`
 	Price     string         `gorm:"column:price" json:"price"`
 	Quantity  string         `gorm:"column:quantity" json:"quantity"`

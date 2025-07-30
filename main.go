@@ -57,15 +57,15 @@ func main() {
 		panic("Consul address list is empty")
 	}
 	nodeID := cfg.MatchEngine.NodeID
-	matchPairs := cfg.MatchEngine.MatchPairs
+	matchsymbols := cfg.MatchEngine.Matchsymbols
 	matchPort := cfg.MatchEngine.MatchPort
-	pairs := util.ParsePairs(matchPairs)
+	symbols := util.Parsesymbols(matchsymbols)
 	// 使用多地址高可用
 	consulHelper, err := service.NewConsulHelperWithAddrs(consulAddrs)
 	if err != nil {
 		panic(err)
 	}
-	if err := service.InitMatchEngineWithHelper(consulHelper, nodeID, pairs, matchPort); err != nil {
+	if err := service.InitMatchEngineWithHelper(consulHelper, nodeID, symbols, matchPort); err != nil {
 		panic(err)
 	}
 

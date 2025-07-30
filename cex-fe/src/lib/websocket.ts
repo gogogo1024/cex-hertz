@@ -13,7 +13,7 @@ interface WSMessage {
 type Callback = (msg: WSMessage) => void;
 
 class WSClient {
-  private ws: WebSocket | null = null;
+  ws: WebSocket | null = null;
   private url: string = '';
   private callbacks: Record<string, Callback[]> = {};
   private messageIdSet: Set<string> = new Set();

@@ -6,6 +6,7 @@ import (
 	"cex-hertz/biz/dal/redis"
 	"cex-hertz/biz/engine"
 	"cex-hertz/biz/model"
+	"cex-hertz/util"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,7 +28,7 @@ type Engine interface {
 }
 
 // 撮合引擎接口
-// 实际业务可扩展为分 pair 的撮合线程池
+// 实际业务可扩展为分 symbol 的撮合线程池
 
 type MatchEngine struct {
 	// 每个交易对一个撮合队列
@@ -58,25 +59,33 @@ func NewMatchEngine(broadcaster engine.Broadcaster, unicaster engine.Unicaster) 
 }
 
 // InitMatchEngineWithHelper 支持传入 ConsulHelper 实例，便于多地址高可用
-func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, pairs []string, port int) error {
+func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, symbols []string, port int) error {
 	consulHelper = helper
-	if err := consulHelper.RegisterMatchEngine(nodeID, pairs, port); err != nil {
+	if err := consulHelper.RegisterMatchEngine(nodeID, symbols, port); err != nil {
 		return err
 	}
-	hlog.Infof("MatchEngine节点已注册到Consul, nodeID=%s, pairs=%v, port=%d", nodeID, pairs, port)
+	hlog.Infof("MatchEngine节点已注册到Consul, nodeID=%s, symbols=%v, port=%d", nodeID, symbols, port)
 	return nil
 }
 
 // SubmitOrder 持久化到数据库
 func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
-	hlog.Infof("SubmitOrder called, order_id=%s, pair=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Pair, order.Side, order.Price, order.Quantity)
+	// 后端生成唯一订单ID
+	id, err := util.GenerateOrderID()
+	if err != nil {
+		hlog.Errorf("生成订单ID失败: %v", err)
+		return
+	}
+	order.OrderID = fmt.Sprintf("%d", id)
+
+	hlog.Infof("SubmitOrder called, order_id=%s, symbol=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Symbol, order.Side, order.Price, order.Quantity)
 	m.mu.Lock()
-	queue, ok := m.orderQueues[order.Pair]
+	queue, ok := m.orderQueues[order.Symbol]
 	if !ok {
 		queue = make(chan model.SubmitOrderMsg, 10000) // 每个交易对一个队列
-		m.orderQueues[order.Pair] = queue
+		m.orderQueues[order.Symbol] = queue
 		// 启动独立撮合 worker goroutine
-		go m.matchWorker(order.Pair, queue)
+		go m.matchWorker(order.Symbol, queue)
 	}
 	m.mu.Unlock()
 
@@ -87,7 +96,7 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	storeMu.Unlock()
 
 	// 持久化到数据库
-	InsertOrder(order.OrderID, order.UserID, order.Pair, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
+	InsertOrder(order.OrderID, order.UserID, order.Symbol, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
 
 	// 缓存用户活跃订单ID
 	if order.UserID != "" {
@@ -97,39 +106,39 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 }
 
 // 每个交易对独立撮合 worker
-func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) {
+func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg) {
 	defer func() {
 		if r := recover(); r != nil {
-			hlog.Errorf("撮合线程panic, pair=%s, err=%v", pair, r)
+			hlog.Errorf("撮合线程panic, symbol=%s, err=%v", symbol, r)
 		}
-		hlog.Infof("撮合线程退出, pair=%s", pair)
+		hlog.Infof("撮合线程退出, symbol=%s", symbol)
 	}()
-	orderBook := NewOrderBook(pair)
+	orderBook := NewOrderBook(symbol)
 	engineID := "node-1" // 可通过配置或环境变量设置
-	hlog.Infof("撮合线程启动, pair=%s, engine_id=%s", pair, engineID)
+	hlog.Infof("撮合线程启动, symbol=%s, engine_id=%s", symbol, engineID)
 	var lastSnapshot = &OrderBookSnapshot{Bids: map[string]string{}, Asks: map[string]string{}}
 	for order := range queue {
-		hlog.Infof("撮合订单, order_id=%s, pair=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Pair, order.Side, order.Price, order.Quantity)
+		hlog.Infof("撮合订单, order_id=%s, symbol=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Symbol, order.Side, order.Price, order.Quantity)
 		trades, filled := orderBook.Match(order)
 		var bids, asks interface{}
 		if filled {
 			hlog.Infof("订单撮合成功, order_id=%s, trade_count=%d", order.OrderID, len(trades))
 			for i, trade := range trades {
-				trade.Pair = pair
+				trade.Symbol = symbol
 				trade.Timestamp = time.Now().UnixMilli()
 				trade.EngineID = engineID
-				trade.TradeID = fmt.Sprintf("trade-%s-%d-%d", pair, time.Now().UnixMilli(), i)
+				trade.TradeID = fmt.Sprintf("trade-%s-%d-%d", symbol, time.Now().UnixMilli(), i)
 				// 优化推送内容，增加 version、server_time、node_id 字段
 				// 生成唯一 message_id（trade_id + 时间戳 + 随机数）
 				messageID := fmt.Sprintf("%s-%d-%d", trade.TradeID, trade.Timestamp, time.Now().UnixNano()%10000)
 				// trace_id 可用 order_id + trade_id 拼接
 				traceID := fmt.Sprintf("%s-%s", order.OrderID, trade.TradeID)
 				result := map[string]interface{}{
-					"channel": pair,
+					"channel": symbol,
 					"type":    "trade",
 					"data": map[string]interface{}{
 						"trade_id":    trade.TradeID,
-						"pair":        trade.Pair,
+						"symbol":      trade.Symbol,
 						"price":       trade.Price,
 						"quantity":    trade.Quantity,
 						"side":        trade.Side,
@@ -154,7 +163,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 				}
 				msg, err := json.Marshal(result)
 				if err == nil {
-					m.broadcaster(pair, msg)
+					m.broadcaster(symbol, msg)
 					// 单播给撮合双方
 					if trade.TakerUser != "" {
 						m.unicaster(trade.TakerUser, msg)
@@ -168,11 +177,11 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 				// 持久化到 PostgreSQL
 				saveTradeToDB(trade)
 				// 缓存成交记录到 Redis
-				cacheTrade(pair, trade, 100)
-				hlog.Infof("成交回报, trade_id=%s, pair=%s, price=%s, quantity=%s", trade.TradeID, trade.Pair, trade.Price, trade.Quantity)
+				cacheTrade(symbol, trade, 100)
+				hlog.Infof("成交回报, trade_id=%s, symbol=%s, price=%s, quantity=%s", trade.TradeID, trade.Symbol, trade.Price, trade.Quantity)
 			}
 		} else {
-			hlog.Infof("订单未成交，推送订单簿变更, order_id=%s, pair=%s", order.OrderID, order.Pair)
+			hlog.Infof("订单未成交，推送订单簿变更, order_id=%s, symbol=%s", order.OrderID, order.Symbol)
 			// 未成交，推送订单簿变更
 			depth := orderBook.DepthSnapshot()
 			bids, _ = depth["buys"]
@@ -181,7 +190,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 			messageID := fmt.Sprintf("%s-%d-%d", order.OrderID, version, time.Now().UnixNano()%10000)
 			traceID := fmt.Sprintf("%s-%d", order.OrderID, version)
 			result := map[string]interface{}{
-				"channel": pair,
+				"channel": symbol,
 				"type":    "depth_update",
 				"data": map[string]interface{}{
 					"bids":      bids,
@@ -203,14 +212,14 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 			}
 			msg, err := json.Marshal(result)
 			if err == nil {
-				m.broadcaster(pair, msg)
+				m.broadcaster(symbol, msg)
 			}
 
 			// 增量快照推送
 			delta := orderBook.DeltaSnapshot(lastSnapshot)
 			if len(delta["bids_delta"].(map[string]string)) > 0 || len(delta["asks_delta"].(map[string]string)) > 0 {
 				deltaResult := map[string]interface{}{
-					"channel": pair,
+					"channel": symbol,
 					"type":    "depth_delta",
 					"data":    delta,
 					"order_ctx": map[string]interface{}{
@@ -227,7 +236,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 				}
 				deltaMsg, err := json.Marshal(deltaResult)
 				if err == nil {
-					m.broadcaster(pair, deltaMsg)
+					m.broadcaster(symbol, deltaMsg)
 				}
 			}
 			// 新 lastSnapshot
@@ -243,7 +252,7 @@ func (m *MatchEngine) matchWorker(pair string, queue chan model.SubmitOrderMsg) 
 			lastSnapshot = &OrderBookSnapshot{Bids: newBids, Asks: newAsks}
 		}
 		// 缓存订单簿快照到 Redis
-		cacheOrderBookSnapshot(pair, bids, asks)
+		cacheOrderBookSnapshot(symbol, bids, asks)
 	}
 }
 
@@ -350,15 +359,15 @@ func InitPostgresPool(connStr string) error {
 //}
 
 //// 聚合并写入多周期K线
-//func updateKlines(db *gorm.DB, pair, price, qty string, ts int64) {
+//func updateKlines(db *gorm.DB, symbol, price, qty string, ts int64) {
 //	for _, period := range klinePeriods {
 //		bucket := ts / klinePeriodSeconds[period] * klinePeriodSeconds[period]
 //		var k model.Kline
-//		err := db.Where("pair = ? AND period = ? AND timestamp = ?", pair, period, bucket).First(&k).Error
+//		err := db.Where("symbol = ? AND period = ? AND timestamp = ?", symbol, period, bucket).First(&k).Error
 //		if err == gorm.ErrRecordNotFound {
 //			// 新K线
 //			k = model.Kline{
-//				Pair:      pair,
+//				symbol:      symbol,
 //				Period:    period,
 //				Timestamp: bucket,
 //				Open:      price,
@@ -387,7 +396,7 @@ func InitPostgresPool(connStr string) error {
 //		}
 //		// 写入Redis
 //		b, _ := json.Marshal(k)
-//		redisKey := "kline:" + pair + ":" + period
+//		redisKey := "kline:" + symbol + ":" + period
 //		redis.RedisClient.RPush(context.Background(), redisKey, b)
 //		redis.RedisClient.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
 //	}
@@ -399,21 +408,21 @@ func saveTradeToDB(trade model.Trade) {
 		return
 	}
 	_, err := pgPool.Exec(context.Background(),
-		`INSERT INTO trades (trade_id, pair, price, quantity, timestamp, taker_order_id, maker_order_id, side, engine_id, taker_user, maker_user)
+		`INSERT INTO trades (trade_id, symbol, price, quantity, timestamp, taker_order_id, maker_order_id, side, engine_id, taker_user, maker_user)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-		trade.TradeID, trade.Pair, trade.Price, trade.Quantity, trade.Timestamp, trade.TakerOrderID, trade.MakerOrderID, trade.Side, trade.EngineID, trade.TakerUser, trade.MakerUser,
+		trade.TradeID, trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp, trade.TakerOrderID, trade.MakerOrderID, trade.Side, trade.EngineID, trade.TakerUser, trade.MakerUser,
 	)
 	if err != nil {
 		hlog.Errorf("持久化成交到Postgres失败, trade_id=%s, err=%v", trade.TradeID, err)
 	}
 	// 新增K线聚合写入
-	UpdateKlines(trade.Pair, trade.Price, trade.Quantity, trade.Timestamp/1000)
+	UpdateKlines(trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp/1000)
 }
 
 // 缓存订单簿快照到 Redis
-func cacheOrderBookSnapshot(pair string, bids, asks interface{}) {
+func cacheOrderBookSnapshot(symbol string, bids, asks interface{}) {
 	ctx := context.Background()
-	key := "orderbook:" + pair
+	key := "orderbook:" + symbol
 	val, err := json.Marshal(map[string]interface{}{"bids": bids, "asks": asks})
 	if err == nil {
 		redis.RedisClient.Set(ctx, key, val, 5*time.Second)
@@ -421,9 +430,9 @@ func cacheOrderBookSnapshot(pair string, bids, asks interface{}) {
 }
 
 // 缓存成交记录到 Redis List
-func cacheTrade(pair string, trade model.Trade, maxLen int64) {
+func cacheTrade(symbol string, trade model.Trade, maxLen int64) {
 	ctx := context.Background()
-	key := "trades:" + pair
+	key := "trades:" + symbol
 	val, err := json.Marshal(trade)
 	if err == nil {
 		redis.RedisClient.LPush(ctx, key, val)
@@ -478,7 +487,7 @@ const (
 // 用于撮合引擎内部流转
 type EngineOrderMsg struct {
 	OrderID   string      `json:"order_id"`
-	Pair      string      `json:"pair"`
+	symbol    string      `json:"symbol"`
 	Side      string      `json:"side"`
 	Price     string      `json:"price"`
 	Quantity  string      `json:"quantity"`
@@ -502,8 +511,8 @@ type EngineOrderMsg struct {
 // isLocalSymbol 判断symbol是否属于本节点
 // 建议迁移到 util.go 工具函数文件中
 // func isLocalSymbol(symbol string) bool {
-// 	pairs := getLocalPairs(cfg)
-// 	for _, p := range pairs {
+// 	symbols := getLocalsymbols(cfg)
+// 	for _, p := range symbols {
 // 		if p == symbol {
 // 			return true
 // 		}
@@ -553,7 +562,7 @@ func (m *MatchEngine) GetOrderByID(orderID string) (model.SubmitOrderMsg, error)
 	return model.SubmitOrderMsg{
 		OrderID:  order.OrderID,
 		UserID:   order.UserID,
-		Pair:     order.Pair,
+		Symbol:   order.Symbol,
 		Side:     order.Side,
 		Price:    order.Price,
 		Quantity: order.Quantity,
@@ -571,7 +580,7 @@ func (m *MatchEngine) ListOrders(userID, status string) ([]model.SubmitOrderMsg,
 		result = append(result, model.SubmitOrderMsg{
 			OrderID:  row.OrderID,
 			UserID:   row.UserID,
-			Pair:     row.Pair,
+			Symbol:   row.Symbol,
 			Side:     row.Side,
 			Price:    row.Price,
 			Quantity: row.Quantity,

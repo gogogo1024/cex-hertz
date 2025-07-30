@@ -53,7 +53,7 @@ export const useOrderUpdateStore = create<OrderUpdateStore>((set) => ({
   })),
 }));
 
-const WS_URL = 'ws://localhost:8081/ws/trades'; // 按需调整
+const WS_URL = 'ws://127.0.0.1:9997/ws'; // 按需调整
 const ORDER_API = '/api/order';
 
 const SYMBOLS = [
@@ -87,27 +87,32 @@ const TradePage: React.FC = () => {
     setTradeCache((cache) => ({ ...cache, [symbol]: trades.slice(0, 50) }));
   };
 
+  // 订单状态变更相关
+  const { orderUpdates, addOrderUpdate, removeOrderUpdate } = useOrderUpdateStore();
+
   // 下单提交
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
     setSuccess('');
-    try {
-      const resp = await fetch(ORDER_API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, price: Number(price), amount: Number(amount), side }),
-      });
-      if (!resp.ok) throw new Error('下单失败');
-      setSuccess('下单成功');
-      setPrice('');
-      setAmount('');
-    } catch (err: any) {
-      setError(err.message || '下单异常');
-    } finally {
+    // 检查 WebSocket 连接状态
+    if (!wsClient.ws || wsClient.ws.readyState !== WebSocket.OPEN) {
       setLoading(false);
+      setError('正在连接服务器，请稍后重试');
+      return;
     }
+    // 通过 WebSocket 发送下单请求
+    wsClient.send({
+      action: 'SubmitOrder',
+      symbol: symbol, // 改为 symbol 字段
+      price: price,
+      quantity: amount,
+      side: side,
+      // 可扩展更多字段，如 user_id
+    });
+    // 提交后等待 ws 返回 order_ack 消息
+    // loading 状态由 ws 回调控制
   };
 
   // WebSocket 频道订阅
@@ -115,14 +120,14 @@ const TradePage: React.FC = () => {
     wsClient.connect(WS_URL);
     // 订阅 trade 消息
     const tradeHandler = (data: any) => {
-      if (data.data && data.data.pair === symbol) {
+      if (data.data && data.data.symbol === symbol) { // 改为 symbol 字段
         addTrade({
           id: data.data.trade_id || data.data.id || '',
           price: Number(data.data.price),
           amount: Number(data.data.quantity || data.data.amount),
           side: data.data.side,
           ts: String(data.data.timestamp || Date.now()),
-          symbol: data.data.pair || symbol,
+          symbol: data.data.symbol || symbol, // 改为 symbol 字段
         });
       }
     };
@@ -140,14 +145,28 @@ const TradePage: React.FC = () => {
     };
     wsClient.subscribe('order_update', orderUpdateHandler);
 
+    // 订阅 order_ack 消息，处理下单结果
+    const orderAckHandler = (data: any) => {
+      if (data.order_id) {
+        setLoading(false);
+        setSuccess('下单成功，订单号：' + data.order_id);
+        setPrice('');
+        setAmount('');
+      }
+      if (data.msg) {
+        setLoading(false);
+        setError(data.msg);
+      }
+    };
+    wsClient.subscribe('order_ack', orderAckHandler);
+
     return () => {
       wsClient.unsubscribe('trade', tradeHandler);
       wsClient.unsubscribe('order_update', orderUpdateHandler);
+      wsClient.unsubscribe('order_ack', orderAckHandler);
     };
     // eslint-disable-next-line
   }, [symbol]);
-
-  const { orderUpdates, removeOrderUpdate } = useOrderUpdateStore();
 
   return (
     <div className="max-w-xl mx-auto p-6 space-y-8">

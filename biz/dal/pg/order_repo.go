@@ -5,11 +5,11 @@ import (
 )
 
 // InsertOrder 插入订单
-func InsertOrder(orderID, userID, pair, side, price, quantity, status string, createdAt, updatedAt int64) error {
+func InsertOrder(orderID, userID, symbol, side, price, quantity, status string, createdAt, updatedAt int64) error {
 	order := &model.Order{
 		OrderID:   orderID,
 		UserID:    userID,
-		Pair:      pair,
+		Symbol:    symbol,
 		Side:      side,
 		Price:     price,
 		Quantity:  quantity,
@@ -52,11 +52,11 @@ func UpdateOrderStatus(orderID, status string) error {
 }
 
 // ListTrades 查询成交记录
-func ListTrades(pair string, limit int) ([]model.Trade, error) {
+func ListTrades(symbol string, limit int) ([]model.Trade, error) {
 	var trades []model.Trade
 	db := GormDB.Model(&model.Trade{})
-	if pair != "" {
-		db = db.Where("pair = ?", pair)
+	if symbol != "" {
+		db = db.Where("symbol = ?", symbol)
 	}
 	err := db.Order("timestamp desc").Limit(limit).Find(&trades).Error
 	return trades, err

@@ -7,16 +7,16 @@ import (
 )
 
 type OrderBook struct {
-	pair  string
-	buys  *skiplist.SkipList // 买单：价格降序
-	sells *skiplist.SkipList // 卖单：价格升序
+	symbol string
+	buys   *skiplist.SkipList // 买单：价格降序
+	sells  *skiplist.SkipList // 卖单：价格升序
 }
 
-func NewOrderBook(pair string) *OrderBook {
+func NewOrderBook(symbol string) *OrderBook {
 	return &OrderBook{
-		pair:  pair,
-		buys:  skiplist.New(priceComparator{}),
-		sells: skiplist.New(priceAscComparator{}),
+		symbol: symbol,
+		buys:   skiplist.New(priceComparator{}),
+		sells:  skiplist.New(priceAscComparator{}),
 	}
 }
 

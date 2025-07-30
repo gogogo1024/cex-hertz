@@ -1,0 +1,36 @@
+<tsung loglevel="notice" version="1.0">
+  <clients>
+    <client host="localhost" use_controller_vm="true"/>
+  </clients>
+  <servers>
+    <server host="127.0.0.1" port="8080" type="tcp"/>
+  </servers>
+  <load>
+    <arrivalphase phase="1" duration="60" unit="second">
+      <users interarrival="0.01" unit="second"/>
+    </arrivalphase>
+  </load>
+  <options>
+    <option type="ts_websocket"/>
+  </options>
+  <sessions>
+    <session name="ws_submit_order" probability="100" type="ts_websocket">
+      <request>
+        <websocket type="connect" url="ws://127.0.0.1:8080/ws"/>
+      </request>
+      <for from="1" to="10" var="i">
+        <request>
+          <websocket type="send">
+            <![CDATA[
+              {"action": "submit_order", "symbol": "BTCUSDT", "side": "buy", "price": "10000", "quantity": "1", "user_id": "user${i}"}
+            ]]>
+          </websocket>
+        </request>
+      </for>
+      <thinktime value="1"/>
+      <request>
+        <websocket type="close"/>
+      </request>
+    </session>
+  </sessions>
+</tsung>

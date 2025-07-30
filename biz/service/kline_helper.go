@@ -24,14 +24,14 @@ var klinePeriodSeconds = map[string]int64{
 }
 
 // UpdateKlines 聚合并写入多周期K线
-func UpdateKlines(pair, price, qty string, ts int64) {
+func UpdateKlines(symbol, price, qty string, ts int64) {
 	for _, period := range klinePeriods {
 		bucket := ts / klinePeriodSeconds[period] * klinePeriodSeconds[period]
-		k, err := pg.GetKline(pair, period, bucket)
+		k, err := pg.GetKline(symbol, period, bucket)
 		if err == gorm.ErrRecordNotFound {
 			// 新K线
 			k = &model.Kline{
-				Pair:      pair,
+				Symbol:    symbol,
 				Period:    period,
 				Timestamp: bucket,
 				Open:      price,
@@ -60,7 +60,7 @@ func UpdateKlines(pair, price, qty string, ts int64) {
 		}
 		// 写入Redis
 		b, _ := json.Marshal(k)
-		redisKey := "kline:" + pair + ":" + period
+		redisKey := "kline:" + symbol + ":" + period
 		redis.RedisClient.RPush(context.Background(), redisKey, b)
 		redis.RedisClient.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
 	}
