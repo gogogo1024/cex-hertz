@@ -1,36 +1,44 @@
-<tsung loglevel="notice" version="1.0">
-  <clients>
-    <client host="localhost" use_controller_vm="true"/>
-  </clients>
-  <servers>
-    <server host="127.0.0.1" port="8080" type="tcp"/>
-  </servers>
-  <load>
-    <arrivalphase phase="1" duration="60" unit="second">
-      <users interarrival="0.01" unit="second"/>
-    </arrivalphase>
-  </load>
-  <options>
-    <option type="ts_websocket"/>
-  </options>
-  <sessions>
-    <session name="ws_submit_order" probability="100" type="ts_websocket">
-      <request>
-        <websocket type="connect" url="ws://127.0.0.1:8080/ws"/>
-      </request>
-      <for from="1" to="10" var="i">
-        <request>
-          <websocket type="send">
-            <![CDATA[
-              {"action": "submit_order", "symbol": "BTCUSDT", "side": "buy", "price": "10000", "quantity": "1", "user_id": "user${i}"}
-            ]]>
-          </websocket>
-        </request>
-      </for>
-      <thinktime value="1"/>
-      <request>
-        <websocket type="close"/>
-      </request>
-    </session>
-  </sessions>
+<?xml version="1.0"?>
+<!DOCTYPE tsung SYSTEM "/usr/local/Cellar/tsung/1.8.0/share/tsung/tsung-1.0.dtd">
+<tsung version="1.0">
+    <clients>
+        <client host="localhost" use_controller_vm="true" maxusers="100000"/>
+    </clients>
+
+    <servers>
+        <server host="127.0.0.1" port="9997" type="tcp"/>
+    </servers>
+
+    <load>
+        <arrivalphase phase="1" duration="100" unit="second">
+            <users interarrival="0.001" unit="second"/>
+        </arrivalphase>
+    </load>
+
+    <options>
+        <option name="ts_websocket"/>
+        <option name="loglevel" value="debug"/>
+    </options>
+
+    <sessions>
+        <session name="ws_submit_order" probability="100" type="ts_websocket">
+            <request>
+                <websocket type="connect" path="/ws"/>
+            </request>
+            <setdynvars sourcetype="random_string" length="6">
+                <var name="uid"/>
+            </setdynvars>
+            <for from="1" to="1" var="i">
+                <transaction name="submit_order">
+                    <request>
+                        <websocket type="message"><![CDATA[{"action":"SubmitOrder","symbol":"BTCUSDT","side":"buy","price":"10000","quantity":"1","user_id":"user_test"}]]></websocket>
+                    </request>
+                </transaction>
+                <thinktime value="1"/>
+            </for>
+<!--            <request>-->
+<!--                <websocket type="close"/>-->
+<!--            </request>-->
+        </session>
+    </sessions>
 </tsung>

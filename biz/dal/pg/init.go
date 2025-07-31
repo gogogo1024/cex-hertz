@@ -25,6 +25,15 @@ func Init() {
 		panic(fmt.Sprintf("failed to ping postgres: %v", err))
 	}
 	PostgresClient = pool
+
+	// 初始化 GORM DB
+	if err := InitGorm(); err != nil {
+		panic(fmt.Sprintf("failed to init gorm: %v", err))
+	}
+	// 自动迁移表结构
+	if err := AutoMigrate(); err != nil {
+		panic(fmt.Sprintf("failed to auto migrate: %v", err))
+	}
 }
 
 func InitGorm() error {

@@ -3,7 +3,7 @@
 package main
 
 import (
-	"cex-hertz/biz/dal/pg"
+	"cex-hertz/biz/dal"
 	"cex-hertz/biz/handler"
 	"cex-hertz/biz/service"
 	"cex-hertz/biz/util"
@@ -28,14 +28,8 @@ import (
 
 func main() {
 	cfg := conf.GetConf()
-
-	// 初始化 GORM DB
-	if err := pg.InitGorm(); err != nil {
-		panic("GORM DB 初始化失败: " + err.Error())
-	}
-	if err := pg.AutoMigrate(); err != nil {
-		panic("GORM 自动迁移失败: " + err.Error())
-	}
+	dal.Init()
+	// GORM DB 初始化和自动迁移已由 dal.Init() 内部完成，无需重复初始化
 
 	h := server.Default()
 	hsPort := cfg.Hertz.WsPort
@@ -50,6 +44,9 @@ func main() {
 	// 初始化 Postgres 连接池（如有需要可调用对应初始化）
 	// 初始化 Kafka Writer
 	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topic)
+	// 初始化订单Kafka Writer和消费者（批量入库）
+	service.InitOrderKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.OrderTopic)
+	service.StartOrderKafkaConsumer(cfg.Kafka.Brokers, cfg.Kafka.OrderTopic)
 
 	// 初始化 Consul 并注册撮合引擎节点
 	consulAddrs := cfg.Registry.RegistryAddress // []string
@@ -99,6 +96,9 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+
+	// 优雅关闭Kafka订单写入协程
+	service.ShutdownOrderKafkaWriter()
 }
 
 func registerMiddleware(h *server.Hertz) {

@@ -158,7 +158,7 @@ func GetKline(c context.Context, ctx *app.RequestContext) {
 	}
 	// 1. 优先查 Redis
 	redisKey := "kline:" + symbol + ":" + period
-	klineData, err := redis.RedisClient.LRange(c, redisKey, int64(-limit), -1).Result()
+	klineData, err := redis.Client.LRange(c, redisKey, int64(-limit), -1).Result()
 	if err == nil && len(klineData) > 0 {
 		var klines []model.Kline
 		for _, v := range klineData {

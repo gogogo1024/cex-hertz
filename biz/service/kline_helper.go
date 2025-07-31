@@ -61,7 +61,7 @@ func UpdateKlines(symbol, price, qty string, ts int64) {
 		// 写入Redis
 		b, _ := json.Marshal(k)
 		redisKey := "kline:" + symbol + ":" + period
-		redis.RedisClient.RPush(context.Background(), redisKey, b)
-		redis.RedisClient.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
+		redis.Client.RPush(context.Background(), redisKey, b)
+		redis.Client.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
 	}
 }

@@ -11,10 +11,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 	"math/rand"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -68,7 +70,7 @@ func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, symbols []st
 	return nil
 }
 
-// SubmitOrder 持久化到数据库
+// SubmitOrder 持久化到Kafka，由独立消费者批量入库
 func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	// 后端生成唯一订单ID
 	id, err := util.GenerateOrderID()
@@ -95,8 +97,8 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	orderStatus[order.OrderID] = "active"
 	storeMu.Unlock()
 
-	// 持久化到数据库
-	InsertOrder(order.OrderID, order.UserID, order.Symbol, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
+	// 持久化到Kafka，由独立消费者批量入库
+	saveOrderToKafka(order)
 
 	// 缓存用户活跃订单ID
 	if order.UserID != "" {
@@ -105,11 +107,144 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	queue <- order
 }
 
-// 每个交易对独立撮合 worker
+// Kafka订单写入相关
+var orderKafkaWriter *kafka.Writer
+var orderBatchChan chan model.SubmitOrderMsg
+
+func InitOrderKafkaWriter(brokers []string, topic string) {
+	orderKafkaWriter = &kafka.Writer{
+		Addr:  kafka.TCP(brokers...),
+		Topic: topic,
+		Async: true,
+	}
+	orderBatchChan = make(chan model.SubmitOrderMsg, 10000)
+	go batchOrderKafkaWriter()
+}
+
+// 优雅关闭Kafka批量写入协程
+var orderKafkaWriterClose = make(chan struct{})
+
+func ShutdownOrderKafkaWriter() {
+	close(orderKafkaWriterClose)
+}
+
+func batchOrderKafkaWriter() {
+	batch := make([]kafka.Message, 0, 100)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case order := <-orderBatchChan:
+			msgBytes, err := json.Marshal(order)
+			if err == nil {
+				batch = append(batch, kafka.Message{Value: msgBytes})
+			}
+			if len(batch) >= 100 {
+				flushOrderKafkaBatch(&batch)
+			}
+		case <-ticker.C:
+			if len(batch) > 0 {
+				flushOrderKafkaBatch(&batch)
+			}
+		case <-orderKafkaWriterClose:
+			// 收到关闭信号，写完剩余数据再退出
+			if len(batch) > 0 {
+				flushOrderKafkaBatch(&batch)
+			}
+			return
+		}
+	}
+}
+
+func flushOrderKafkaBatch(batch *[]kafka.Message) {
+	if orderKafkaWriter == nil || len(*batch) == 0 {
+		return
+	}
+	err := orderKafkaWriter.WriteMessages(context.Background(), (*batch)...)
+	if err != nil {
+		hlog.Errorf("批量写入订单到Kafka失败: %v", err)
+	}
+	*batch = (*batch)[:0]
+}
+
+func saveOrderToKafka(order model.SubmitOrderMsg) {
+	if orderBatchChan != nil {
+		orderBatchChan <- order
+	}
+}
+
+// Kafka订单消费批量入库相关
+var orderKafkaConsumerClose chan struct{}
+
+func StartOrderKafkaConsumer(brokers []string, topic string) {
+	orderKafkaConsumerClose = make(chan struct{})
+	r := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  brokers,
+		Topic:    topic,
+		GroupID:  "order-db-writer",
+		MinBytes: 10e3, // 10KB
+		MaxBytes: 10e6, // 10MB
+	})
+	go func() {
+		batch := make([]model.SubmitOrderMsg, 0, 100)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-orderKafkaConsumerClose:
+				if len(batch) > 0 {
+					batchInsertOrders(batch)
+					batch = batch[:0]
+				}
+				return
+			default:
+				m, err := r.ReadMessage(context.Background())
+				if err != nil {
+					hlog.Errorf("Kafka订单消费失败: %v", err)
+					continue
+				}
+				var order model.SubmitOrderMsg
+				if err := json.Unmarshal(m.Value, &order); err == nil {
+					batch = append(batch, order)
+				}
+				if len(batch) >= 100 {
+					batchInsertOrders(batch)
+					batch = batch[:0]
+				}
+				select {
+				case <-ticker.C:
+					if len(batch) > 0 {
+						batchInsertOrders(batch)
+						batch = batch[:0]
+					}
+				default:
+				}
+			}
+		}
+	}()
+}
+
+func batchInsertOrders(orders []model.SubmitOrderMsg) {
+	if pgPool == nil || len(orders) == 0 {
+		return
+	}
+	batch := &pgx.Batch{}
+	for _, order := range orders {
+		batch.Queue(`INSERT INTO orders (order_id, user_id, symbol, side, price, quantity, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			order.OrderID, order.UserID, order.Symbol, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := pgPool.SendBatch(ctx, batch).Exec()
+	if err != nil {
+		hlog.Errorf("批量插入订单到Postgres失败: %v", err)
+	}
+}
+
 func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg) {
 	defer func() {
 		if r := recover(); r != nil {
-			hlog.Errorf("撮合线程panic, symbol=%s, err=%v", symbol, r)
+			hlog.Errorf("撮合线程panic, symbol=%s, err=%v, stack=%s", symbol, r, debug.Stack())
 		}
 		hlog.Infof("撮合线程退出, symbol=%s", symbol)
 	}()
@@ -129,7 +264,7 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				trade.EngineID = engineID
 				trade.TradeID = fmt.Sprintf("trade-%s-%d-%d", symbol, time.Now().UnixMilli(), i)
 				// 优化推送内容，增加 version、server_time、node_id 字段
-				// 生成唯一 message_id（trade_id + 时间戳 + 随机数）
+				// 唯一 message_id（trade_id + 时间戳 + 随机数）
 				messageID := fmt.Sprintf("%s-%d-%d", trade.TradeID, trade.Timestamp, time.Now().UnixNano()%10000)
 				// trace_id 可用 order_id + trade_id 拼接
 				traceID := fmt.Sprintf("%s-%s", order.OrderID, trade.TradeID)
@@ -240,13 +375,21 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				}
 			}
 			// 新 lastSnapshot
-			// 重新生成全量 bids/asks map
+			// 重新生成全量 bids/asks map，增加类型断言保护，防止panic
+			bidsSlice, okBids := bids.([]map[string]string)
+			if !okBids || bidsSlice == nil {
+				bidsSlice = []map[string]string{}
+			}
+			asksSlice, okAsks := asks.([]map[string]string)
+			if !okAsks || asksSlice == nil {
+				asksSlice = []map[string]string{}
+			}
 			newBids := map[string]string{}
-			for _, b := range bids.([]map[string]string) {
+			for _, b := range bidsSlice {
 				newBids[b["price"]] = b["quantity"]
 			}
 			newAsks := map[string]string{}
-			for _, a := range asks.([]map[string]string) {
+			for _, a := range asksSlice {
 				newAsks[a["price"]] = a["quantity"]
 			}
 			lastSnapshot = &OrderBookSnapshot{Bids: newBids, Asks: newAsks}
@@ -386,7 +529,7 @@ func InitPostgresPool(connStr string) error {
 //				k.Low = price
 //			}
 //			k.Close = price
-//			// 累加成交量
+//			// 累加成交��
 //			if v, err := strconv.ParseFloat(k.Volume, 64); err == nil {
 //				if q, err := strconv.ParseFloat(qty, 64); err == nil {
 //					k.Volume = strconv.FormatFloat(v+q, 'f', -1, 64)
@@ -419,13 +562,34 @@ func saveTradeToDB(trade model.Trade) {
 	UpdateKlines(trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp/1000)
 }
 
+// 优雅处理 bids/asks nil 为 []
+func safeSlice[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 // 缓存订单簿快照到 Redis
 func cacheOrderBookSnapshot(symbol string, bids, asks interface{}) {
 	ctx := context.Background()
 	key := "orderbook:" + symbol
-	val, err := json.Marshal(map[string]interface{}{"bids": bids, "asks": asks})
+
+	// 尝试将 bids/asks 转为 []map[string]string 类型并安全处理
+	var safeBids, safeAsks interface{} = bids, asks
+	if b, ok := bids.([]map[string]string); ok {
+		safeBids = safeSlice(b)
+	}
+	if a, ok := asks.([]map[string]string); ok {
+		safeAsks = safeSlice(a)
+	}
+
+	val, err := json.Marshal(map[string]interface{}{"bids": safeBids, "asks": safeAsks})
 	if err == nil {
-		redis.RedisClient.Set(ctx, key, val, 5*time.Second)
+		err := redis.Client.Set(ctx, key, val, 5*time.Second).Err()
+		if err != nil {
+			hlog.Errorf("Redis Set 失败: %v", err)
+		}
 	}
 }
 
@@ -435,8 +599,8 @@ func cacheTrade(symbol string, trade model.Trade, maxLen int64) {
 	key := "trades:" + symbol
 	val, err := json.Marshal(trade)
 	if err == nil {
-		redis.RedisClient.LPush(ctx, key, val)
-		redis.RedisClient.LTrim(ctx, key, 0, maxLen-1)
+		redis.Client.LPush(ctx, key, val)
+		redis.Client.LTrim(ctx, key, 0, maxLen-1)
 	}
 }
 
@@ -447,8 +611,8 @@ func cacheUserActiveOrder(userID, orderID string) {
 	}
 	ctx := context.Background()
 	key := "user:active_orders:" + userID
-	redis.RedisClient.SAdd(ctx, key, orderID)
-	redis.RedisClient.Expire(ctx, key, 24*time.Hour)
+	redis.Client.SAdd(ctx, key, orderID)
+	redis.Client.Expire(ctx, key, 24*time.Hour)
 }
 
 // 从 Redis 移除用户活跃订单ID
@@ -458,7 +622,7 @@ func removeUserActiveOrder(userID, orderID string) {
 	}
 	ctx := context.Background()
 	key := "user:active_orders:" + userID
-	redis.RedisClient.SRem(ctx, key, orderID)
+	redis.Client.SRem(ctx, key, orderID)
 }
 
 // 查询用户活跃订单ID列表
@@ -468,7 +632,7 @@ func GetUserActiveOrders(userID string) ([]string, error) {
 	}
 	ctx := context.Background()
 	key := "user:active_orders:" + userID
-	return redis.RedisClient.SMembers(ctx, key).Result()
+	return redis.Client.SMembers(ctx, key).Result()
 }
 
 // OrderStatus 订单状态常量
