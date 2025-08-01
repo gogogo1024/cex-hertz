@@ -117,8 +117,9 @@ type Postgres struct {
 	DSN string `mapstructure:"dsn" yaml:"dsn"`
 }
 type Kafka struct {
-	Brokers []string `mapstructure:"brokers" yaml:"brokers"`
-	Topic   string   `mapstructure:"topic" yaml:"topic"`
+	Brokers    []string `mapstructure:"brokers" yaml:"brokers"`
+	Topic      string   `mapstructure:"topic" yaml:"topic"`
+	OrderTopic string   `mapstructure:"order_topic" yaml:"order_topic"`
 }
 type Registry struct {
 	RegistryAddress []string `mapstructure:"registry_address" yaml:"registry_address"`

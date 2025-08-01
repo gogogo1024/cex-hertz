@@ -228,6 +228,7 @@ func batchInsertOrders(orders []model.SubmitOrderMsg) {
 	if pgPool == nil || len(orders) == 0 {
 		return
 	}
+	hlog.Infof("[OrderBatch] 准备批量插入订单, 数量: %d", len(orders))
 	batch := &pgx.Batch{}
 	for _, order := range orders {
 		batch.Queue(`INSERT INTO orders (order_id, user_id, symbol, side, price, quantity, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
@@ -237,7 +238,9 @@ func batchInsertOrders(orders []model.SubmitOrderMsg) {
 	defer cancel()
 	_, err := pgPool.SendBatch(ctx, batch).Exec()
 	if err != nil {
-		hlog.Errorf("批量插入订单到Postgres失败: %v", err)
+		hlog.Errorf("[OrderBatch] 批量插入订单到Postgres失败: %v", err)
+	} else {
+		hlog.Infof("[OrderBatch] 批量插入订单到Postgres成功, 数量: %d", len(orders))
 	}
 }
 
