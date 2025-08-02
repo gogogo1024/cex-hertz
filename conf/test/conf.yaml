@@ -33,8 +33,9 @@ postgres:
 kafka:
   brokers:
     - "localhost:9092"
-  topic: "trades"
-  order_topic: "orders"
+  topics:
+    trade: "trade"
+    order: "order"
 match_engine:
   node_id: "node-1"
   match_symbols: "BTCUSDT,ETHUSDT"

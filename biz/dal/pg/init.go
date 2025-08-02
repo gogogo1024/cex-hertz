@@ -53,7 +53,12 @@ func AutoMigrate() error {
 	}
 	return GormDB.AutoMigrate(&model.Order{}, &model.Trade{})
 }
-
+func GetPool() *pgxpool.Pool {
+	if PostgresClient == nil {
+		panic("PostgresClient未初始化，请先调用 pg.Init() 或 pg.InitPostgresPool()")
+	}
+	return PostgresClient
+}
 func InitTradeTable() error {
 	if GormDB == nil {
 		return gorm.ErrInvalidDB

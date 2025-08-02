@@ -2,7 +2,7 @@
 <!DOCTYPE tsung SYSTEM "/usr/local/Cellar/tsung/1.8.0/share/tsung/tsung-1.0.dtd">
 <tsung version="1.0">
     <clients>
-        <client host="localhost" use_controller_vm="true" maxusers="100000"/>
+        <client host="localhost" use_controller_vm="true" maxusers="1000000"/>
     </clients>
 
     <servers>
@@ -11,7 +11,7 @@
 
     <load>
         <arrivalphase phase="1" duration="100" unit="second">
-            <users interarrival="0.001" unit="second"/>
+            <users interarrival="0.0001" unit="second"/>
         </arrivalphase>
     </load>
 

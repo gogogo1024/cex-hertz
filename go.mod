@@ -18,6 +18,7 @@ require (
 	github.com/panjf2000/ants/v2 v2.11.3
 	github.com/redis/go-redis/v9 v9.11.0
 	github.com/segmentio/kafka-go v0.4.48
+	github.com/sony/sonyflake v1.3.0
 	github.com/spf13/viper v1.20.1
 	go.uber.org/zap v1.27.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
@@ -65,7 +66,6 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/sagikazarmark/locafero v0.7.0 // indirect
-	github.com/sony/sonyflake v1.3.0 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.12.0 // indirect
 	github.com/spf13/cast v1.7.1 // indirect

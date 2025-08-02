@@ -3,20 +3,22 @@ package service
 
 import (
 	"bytes"
+	kafkaDal "cex-hertz/biz/dal/kafka"
+	"cex-hertz/biz/dal/pg"
 	"cex-hertz/biz/dal/redis"
 	"cex-hertz/biz/engine"
 	"cex-hertz/biz/model"
+	"cex-hertz/conf"
 	"cex-hertz/util"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 	"math/rand"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 )
@@ -108,15 +110,11 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 }
 
 // Kafka订单写入相关
-var orderKafkaWriter *kafka.Writer
 var orderBatchChan chan model.SubmitOrderMsg
+var orderKafkaTopic string
 
-func InitOrderKafkaWriter(brokers []string, topic string) {
-	orderKafkaWriter = &kafka.Writer{
-		Addr:  kafka.TCP(brokers...),
-		Topic: topic,
-		Async: true,
-	}
+func InitOrderKafkaWriter(topic string) {
+	orderKafkaTopic = topic
 	orderBatchChan = make(chan model.SubmitOrderMsg, 10000)
 	go batchOrderKafkaWriter()
 }
@@ -157,12 +155,21 @@ func batchOrderKafkaWriter() {
 }
 
 func flushOrderKafkaBatch(batch *[]kafka.Message) {
-	if orderKafkaWriter == nil || len(*batch) == 0 {
+	if len(*batch) == 0 {
+		hlog.Infof("[OrderKafkaBatch] flushOrderKafkaBatch被调用，但batch为空")
 		return
 	}
-	err := orderKafkaWriter.WriteMessages(context.Background(), (*batch)...)
+	writer := kafkaDal.GetWriter(orderKafkaTopic)
+	if writer == nil {
+		hlog.Errorf("[OrderKafkaBatch] Kafka writer未初始化，topic=%v，无法写入Kafka", orderKafkaTopic)
+		return
+	}
+	hlog.Infof("[OrderKafkaBatch] 开始写入Kafka，topic=%v，消息数量=%d", orderKafkaTopic, len(*batch))
+	err := writer.WriteMessages(context.Background(), (*batch)...)
 	if err != nil {
-		hlog.Errorf("批量写入订单到Kafka失败: %v", err)
+		hlog.Errorf("[OrderKafkaBatch] 写入Kafka失败，topic=%v，err=%v", orderKafkaTopic, err)
+	} else {
+		hlog.Infof("[OrderKafkaBatch] 写入Kafka成功，topic=%v，消息数量=%d", orderKafkaTopic, len(*batch))
 	}
 	*batch = (*batch)[:0]
 }
@@ -176,19 +183,21 @@ func saveOrderToKafka(order model.SubmitOrderMsg) {
 // Kafka订单消费批量入库相关
 var orderKafkaConsumerClose chan struct{}
 
-func StartOrderKafkaConsumer(brokers []string, topic string) {
+func StartOrderKafkaConsumer(topic string) {
 	orderKafkaConsumerClose = make(chan struct{})
+	brokers := conf.GetConf().Kafka.Brokers
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:  brokers,
 		Topic:    topic,
 		GroupID:  "order-db-writer",
-		MinBytes: 10e3, // 10KB
+		MinBytes: 100,  // 优化为100字节，提升小消息消费速率
 		MaxBytes: 10e6, // 10MB
 	})
 	go func() {
-		batch := make([]model.SubmitOrderMsg, 0, 100)
-		ticker := time.NewTicker(10 * time.Millisecond)
+		batch := make([]model.SubmitOrderMsg, 0, 1000)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
+		hlog.Infof("[OrderKafkaConsumer] Kafka Reader初始化: topic=%s, groupID=%s, brokers=%v", topic, "order-db-writer", brokers)
 		for {
 			select {
 			case <-orderKafkaConsumerClose:
@@ -197,27 +206,41 @@ func StartOrderKafkaConsumer(brokers []string, topic string) {
 					batch = batch[:0]
 				}
 				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+				defer cancel()
+				msgBatch := make([]model.SubmitOrderMsg, 0, 10000)
+				for {
+					m, err := r.ReadMessage(ctx)
+					if err != nil {
+						break // 超时或无新消息
+					}
+					var order model.SubmitOrderMsg
+					if err := json.Unmarshal(m.Value, &order); err == nil {
+						msgBatch = append(msgBatch, order)
+					}
+					if len(msgBatch) >= 10000 {
+						break // 达到最大批量
+					}
+				}
+				if len(msgBatch) > 0 {
+					batchInsertOrders(msgBatch)
+				}
 			default:
-				m, err := r.ReadMessage(context.Background())
-				if err != nil {
-					hlog.Errorf("Kafka订单消费失败: %v", err)
-					continue
-				}
-				var order model.SubmitOrderMsg
-				if err := json.Unmarshal(m.Value, &order); err == nil {
-					batch = append(batch, order)
-				}
-				if len(batch) >= 100 {
-					batchInsertOrders(batch)
-					batch = batch[:0]
-				}
-				select {
-				case <-ticker.C:
-					if len(batch) > 0 {
+				// 兼容老逻辑，防止消息丢失
+				// 移除 r.Buffered()，改为尝试拉取一条消息
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+				defer cancel()
+				m, err := r.ReadMessage(ctx)
+				if err == nil {
+					var order model.SubmitOrderMsg
+					if err := json.Unmarshal(m.Value, &order); err == nil {
+						batch = append(batch, order)
+					}
+					if len(batch) >= 1000 {
 						batchInsertOrders(batch)
 						batch = batch[:0]
 					}
-				default:
 				}
 			}
 		}
@@ -225,18 +248,39 @@ func StartOrderKafkaConsumer(brokers []string, topic string) {
 }
 
 func batchInsertOrders(orders []model.SubmitOrderMsg) {
-	if pgPool == nil || len(orders) == 0 {
+	hlog.Infof("[OrderBatch] batchInsertOrders方法被调用, pgPool是否为nil: %v, 订单数量: %d", pg.GetPool() == nil, len(orders))
+	if pg.GetPool() == nil || len(orders) == 0 {
 		return
 	}
 	hlog.Infof("[OrderBatch] 准备批量插入订单, 数量: %d", len(orders))
-	batch := &pgx.Batch{}
-	for _, order := range orders {
-		batch.Queue(`INSERT INTO orders (order_id, user_id, symbol, side, price, quantity, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			order.OrderID, order.UserID, order.Symbol, order.Side, order.Price, order.Quantity, "active", time.Now().UnixMilli(), time.Now().UnixMilli())
+	for i, order := range orders {
+		hlog.Infof("[OrderBatch] 插入订单[%d]: order_id=%v, user_id=%v, symbol=%v, side=%v, price=%v, quantity=%v", i, order.OrderID, order.UserID, order.Symbol, order.Side, order.Price, order.Quantity)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if len(orders) == 0 {
+		return
+	}
+	// 构造原生多值INSERT语句
+	query := "INSERT INTO orders (order_id, user_id, symbol, side, price, quantity, status, created_at, updated_at) VALUES "
+	args := make([]interface{}, 0, len(orders)*9)
+	valueStrings := make([]string, 0, len(orders))
+	for i, order := range orders {
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*9+1, i*9+2, i*9+3, i*9+4, i*9+5, i*9+6, i*9+7, i*9+8, i*9+9))
+		args = append(args,
+			order.OrderID,
+			order.UserID,
+			order.Symbol,
+			order.Side,
+			order.Price,
+			order.Quantity,
+			"active",
+			time.Now().UnixMilli(),
+			time.Now().UnixMilli(),
+		)
+	}
+	query += strings.Join(valueStrings, ",")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := pgPool.SendBatch(ctx, batch).Exec()
+	_, err := pg.GetPool().Exec(ctx, query, args...)
 	if err != nil {
 		hlog.Errorf("[OrderBatch] 批量插入订单到Postgres失败: %v", err)
 	} else {
@@ -266,10 +310,10 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				trade.Timestamp = time.Now().UnixMilli()
 				trade.EngineID = engineID
 				trade.TradeID = fmt.Sprintf("trade-%s-%d-%d", symbol, time.Now().UnixMilli(), i)
-				// 优化推送内容，增加 version、server_time、node_id 字段
-				// 唯一 message_id（trade_id + 时间戳 + 随机数）
+				// 优化推送内���，增加 version、server_time、node_id 字段
+				// ��一 message_id（trade_id + 时间戳 + 随机数）
 				messageID := fmt.Sprintf("%s-%d-%d", trade.TradeID, trade.Timestamp, time.Now().UnixNano()%10000)
-				// trace_id 可用 order_id + trade_id 拼接
+				// trace_id 可用 order_id + trade_id 拼���
 				traceID := fmt.Sprintf("%s-%s", order.OrderID, trade.TradeID)
 				result := map[string]interface{}{
 					"channel": symbol,
@@ -324,7 +368,7 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 			depth := orderBook.DepthSnapshot()
 			bids, _ = depth["buys"]
 			asks, _ = depth["sells"]
-			version := time.Now().UnixMilli() // 用时间戳做快照版本
+			version := time.Now().UnixMilli() // ��时间戳做快照版本
 			messageID := fmt.Sprintf("%s-%d-%d", order.OrderID, version, time.Now().UnixNano()%10000)
 			traceID := fmt.Sprintf("%s-%d", order.OrderID, version)
 			result := map[string]interface{}{
@@ -479,17 +523,6 @@ func saveTradeToKafka(trade model.Trade) {
 	}
 }
 
-var pgPool *pgxpool.Pool
-
-func InitPostgresPool(connStr string) error {
-	pool, err := pgxpool.New(context.Background(), connStr)
-	if err != nil {
-		return err
-	}
-	pgPool = pool
-	return nil
-}
-
 //// K线周期定义
 //var klinePeriods = []string{"1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"}
 //var klinePeriodSeconds = map[string]int64{
@@ -504,7 +537,7 @@ func InitPostgresPool(connStr string) error {
 //	"1M":  2592000, // 30天
 //}
 
-//// 聚合并写入多周期K线
+//// ��合并写入多周期K线
 //func updateKlines(db *gorm.DB, symbol, price, qty string, ts int64) {
 //	for _, period := range klinePeriods {
 //		bucket := ts / klinePeriodSeconds[period] * klinePeriodSeconds[period]
@@ -549,11 +582,11 @@ func InitPostgresPool(connStr string) error {
 //}
 
 func saveTradeToDB(trade model.Trade) {
-	if pgPool == nil {
+	if pg.GetPool() == nil {
 		hlog.Warnf("Postgres连接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
 		return
 	}
-	_, err := pgPool.Exec(context.Background(),
+	_, err := pg.GetPool().Exec(context.Background(),
 		`INSERT INTO trades (trade_id, symbol, price, quantity, timestamp, taker_order_id, maker_order_id, side, engine_id, taker_user, maker_user)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		trade.TradeID, trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp, trade.TakerOrderID, trade.MakerOrderID, trade.Side, trade.EngineID, trade.TakerUser, trade.MakerUser,
@@ -667,16 +700,16 @@ type EngineOrderMsg struct {
 }
 
 // 判断本节点是否负责该symbol
-// 建议迁移到 util.go 工具函数文件中
+// 建议迁移到 util.go 工具函数文件���
 // func IsLocalMatchEngine(symbol string) bool {
 // 	if consulHelper == nil {
-// 		return true // 未启用Consul则全部本地处理
+// 		return true // 未启用Consul则全部��地处理
 // 	}
 // 	return isLocalSymbol(symbol)
 // }
 
 // isLocalSymbol 判断symbol是否属于本节点
-// 建议迁移到 util.go 工具函数文件中
+// ���议迁移到 util.go 工具函数文件中
 // func isLocalSymbol(symbol string) bool {
 // 	symbols := getLocalsymbols(cfg)
 // 	for _, p := range symbols {
@@ -687,7 +720,7 @@ type EngineOrderMsg struct {
 // 	return false
 // }
 
-// ForwardOrderToMatchEngine 转发订单到目标撮合节点（HTTP示例）
+// ForwardOrderToMatchEngine 转发订单到目��撮合节点（HTTP示例）
 func ForwardOrderToMatchEngine(symbol string, data []byte) error {
 	if consulHelper == nil {
 		return fmt.Errorf("consul not initialized")

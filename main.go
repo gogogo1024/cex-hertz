@@ -43,10 +43,10 @@ func main() {
 
 	// 初始化 Postgres 连接池（如有需要可调用对应初始化）
 	// 初始化 Kafka Writer
-	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topic)
+	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topics["trade"])
 	// 初始化订单Kafka Writer和消费者（批量入库）
-	service.InitOrderKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.OrderTopic)
-	service.StartOrderKafkaConsumer(cfg.Kafka.Brokers, cfg.Kafka.OrderTopic)
+	service.InitOrderKafkaWriter(cfg.Kafka.Topics["order"])
+	service.StartOrderKafkaConsumer(cfg.Kafka.Topics["order"])
 
 	// 初始化 Consul 并注册撮合引擎节点
 	consulAddrs := cfg.Registry.RegistryAddress // []string
