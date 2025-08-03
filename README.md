@@ -6,59 +6,90 @@
 
 ```
 biz/
-  handler/    # 业务接口处理（HTTP、WebSocket）
-  model/      # 业务数据结构定义（如订单、撮合结果）
-  service/    # 核心业务逻辑（撮合引擎、订单簿、Consul注册等）
-  dal/        # 数据访问层（数据库、Redis、Kafka 初始化等）
-  util/       # 工具函数
-conf/         # 配置文件与加载逻辑
-server/       # WebSocket 服务端实现、频道管理
-handler/      # WebSocket 相关处理（如 ws_handler.go）
-main.go       # 启动入口
-router.go     # 路由注册
-Dockerfile    # Docker 构建文件
+  dal/
+    kafka/         # Kafka初始化与写入
+    pg/            # Postgres数据库相关
+    redis/         # Redis缓存相关
+  engine/          # 撮合引擎接口
+  handler/         # HTTP与WebSocket接口处理
+  model/           # 业务数据结构定义（订单、撮合结果等）
+  service/         # 核心业务逻辑（撮合引擎、订单簿、Consul注册等）
+  router/          # 路由注册
+  util/            # 工具函数
+cmd/               # 命令行入口
+conf/              # 配置文件与加载逻辑
+  dev/             # 开发环境配置
+  test/            # 测试环境配置
+server/            # WebSocket服务端实现、频道管理
+handler/           # WebSocket相关处理
+middleware/        # 分布式撮合中间件
+pkg/               # 公共包
+script/            # 启动脚本
+benchmark/         # 性能测试脚本
+cex-fe/            # 前端项目（Vite+React）
+doc/               # 设计文档
+main.go            # 启动入口
+router.go          # 路由注册
+Dockerfile         # Docker构建文件
 docker-compose-base.yaml # 一键启动依赖服务
 ```
 
 ## 主要模块说明
 
-- **biz/handler/**
-  - `order.go`：HTTP 下单、订单相关接口
-  - `ws_handler.go`：WebSocket 消息处理（如订阅、下单、撮合结果推送）
-  - `middleware_distributed.go`：分布式撮合路由中间件
-  - `ping.go`：健康检查接口
-
-- **biz/model/**
-  - `order.go`：订单、撮合等核心数据结构定义
-
-- **biz/service/**
-  - `match_engine.go`：撮合引擎核心逻辑
-  - `orderbook.go/orderbook_manager.go`：订单簿管理
-  - `consul_helper.go`：Consul 注册与服务发现
-
 - **biz/dal/**
-  - `pg/`、`redis/`、`kafka/`：数据库、缓存、消息队列初始化
-
+  - `kafka/`：Kafka初始化与批量写入
+  - `pg/`：Postgres数据库访问，订单/成交批量插入
+  - `redis/`：Redis缓存初始化
+- **biz/engine/**
+  - `engine.go`：撮合引擎接口定义
+- **biz/handler/**
+  - `order.go`：HTTP下单、订单相关接口
+  - `ws_handler.go`：WebSocket消息处理
+  - `ping.go`：健康检查接口
+- **biz/model/**
+  - `order.go`、`trade.go`、`kline.go`：核心数据结构
+- **biz/service/**
+  - `match_engine.go`：撮合引擎核心逻辑，支持批量订单消费与原生多值INSERT批量入库
+  - `orderbook.go/orderbook_manager.go`：订单簿管理
+  - `consul_helper.go`：Consul注册与服务发现
 - **server/**
-  - `websocket_server.go`：WebSocket 服务端实现、频道订阅/广播
-
+  - `websocket_server.go`：WebSocket服务端实现、频道订阅/广播
 - **conf/**
   - `conf.go`：配置加载逻辑
   - `dev/`、`test/`：不同环境的配置文件
-
 - **util/**
   - `util.go`：通用工具函数
+- **middleware/**
+  - `distributed.go`：分布式撮合路由中间件
+- **benchmark/**
+  - `tsung.xml`：压力测试脚本
+- **cex-fe/**
+  - 前端项目，基于Vite+React
+- **doc/**
+  - 设计文档、系统架构说明
 
-- **main.go**
-  - 项目启动入口，初始化各模块、注册路由、中间件、启动 HTTP/WS 服务
+## 新特性说明
 
-- **router.go**
-  - 路由注册（自动生成）
+- 撮合引擎支持 Kafka 批量消费，积压消息可高效批量处理。
+- 订单批量入库采用原生多值 INSERT 语法，显著提升 Postgres 性能。
+- 支持分布式撮合、Consul 服务发现、WebSocket 实时推送。
+- 前后端分离，前端项目位于 cex-fe/，支持行情展示与下单。
 
-- **docker-compose-base.yaml**
-  - 一键启动 Consul、Postgres、Redis、Kafka 等依赖服务
+## 启动与测试
+
+1. 启动依赖服务：
+   ```sh
+   docker-compose -f docker-compose-base.yaml up -d
+   ```
+2. 启动后端服务：
+   ```sh
+   go run main.go
+   ```
+3. 启动前端服务：
+   ```sh
+   cd cex-fe && npm install && npm run dev
+   ```
+4. 压测可参考 benchmark/tsung.xml。
 
 ---
-
-如需详细接口文档或模块用法说明，请查阅各目录下 README 或源码注释。
-
+如需详细文档请参考 doc/ 目录。
