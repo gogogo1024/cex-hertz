@@ -17,6 +17,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"math/rand"
 	"net/http"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -186,65 +187,92 @@ var orderKafkaConsumerClose chan struct{}
 func StartOrderKafkaConsumer(topic string) {
 	orderKafkaConsumerClose = make(chan struct{})
 	brokers := conf.GetConf().Kafka.Brokers
-	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  brokers,
-		Topic:    topic,
-		GroupID:  "order-db-writer",
-		MinBytes: 100,  // 优化为100字节，提升小消息消费速率
-		MaxBytes: 10e6, // 10MB
-	})
-	go func() {
-		batch := make([]model.SubmitOrderMsg, 0, 1000)
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		hlog.Infof("[OrderKafkaConsumer] Kafka Reader初始化: topic=%s, groupID=%s, brokers=%v", topic, "order-db-writer", brokers)
-		for {
-			select {
-			case <-orderKafkaConsumerClose:
-				if len(batch) > 0 {
+	consumerNum := runtime.NumCPU()
+	for i := 0; i < consumerNum; i++ {
+		go orderKafkaConsumerWorker(i, brokers, topic)
+	}
+}
+
+// 拆分后的worker逻辑
+func orderKafkaConsumerWorker(idx int, brokers []string, topic string) {
+	r := initOrderKafkaReader(brokers, topic)
+	batch := make([]model.SubmitOrderMsg, 0, 50000)
+	var batchWait time.Duration = 1 * time.Second
+	var batchMinSize = 1000
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	hlog.Infof("[OrderKafkaConsumer-%d] Kafka Reader初始化: topic=%s, groupID=%s, brokers=%v", idx, topic, "order-db-writer", brokers)
+	for {
+		select {
+		case <-orderKafkaConsumerClose:
+			if len(batch) > 0 {
+				batchInsertOrders(batch)
+				batch = batch[:0]
+			}
+			return
+		case <-ticker.C:
+			batchWait, batchMinSize = adjustBatchParams(r)
+			msgBatch := consumeOrderMessages(r, batchWait)
+			if len(msgBatch) >= batchMinSize {
+				batchInsertOrders(msgBatch)
+			}
+		default:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+			m, err := r.ReadMessage(ctx)
+			if err == nil {
+				var order model.SubmitOrderMsg
+				if err := json.Unmarshal(m.Value, &order); err == nil {
+					batch = append(batch, order)
+				}
+				if len(batch) >= 50000 {
 					batchInsertOrders(batch)
 					batch = batch[:0]
 				}
-				return
-			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-				defer cancel()
-				msgBatch := make([]model.SubmitOrderMsg, 0, 10000)
-				for {
-					m, err := r.ReadMessage(ctx)
-					if err != nil {
-						break // 超时或无新消息
-					}
-					var order model.SubmitOrderMsg
-					if err := json.Unmarshal(m.Value, &order); err == nil {
-						msgBatch = append(msgBatch, order)
-					}
-					if len(msgBatch) >= 10000 {
-						break // 达到最大批量
-					}
-				}
-				if len(msgBatch) > 0 {
-					batchInsertOrders(msgBatch)
-				}
-			default:
-				// 兼容老逻辑，防止消息丢失
-				// 移除 r.Buffered()，改为尝试拉取一条消息
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-				defer cancel()
-				m, err := r.ReadMessage(ctx)
-				if err == nil {
-					var order model.SubmitOrderMsg
-					if err := json.Unmarshal(m.Value, &order); err == nil {
-						batch = append(batch, order)
-					}
-					if len(batch) >= 1000 {
-						batchInsertOrders(batch)
-						batch = batch[:0]
-					}
-				}
 			}
+			cancel()
 		}
-	}()
+	}
+}
+
+func initOrderKafkaReader(brokers []string, topic string) *kafka.Reader {
+	return kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  brokers,
+		Topic:    topic,
+		GroupID:  "order-db-writer",
+		MinBytes: 1000,
+		MaxBytes: 20e6,
+	})
+}
+
+func adjustBatchParams(r *kafka.Reader) (time.Duration, int) {
+	stats := r.Stats()
+	lag := stats.Lag
+	if lag > 20000 {
+		return 100 * time.Millisecond, 100
+	} else if lag > 5000 {
+		return 500 * time.Millisecond, 500
+	}
+	return 1 * time.Second, 1000
+}
+
+func consumeOrderMessages(r *kafka.Reader, batchWait time.Duration) []model.SubmitOrderMsg {
+	ctx, cancel := context.WithTimeout(context.Background(), batchWait)
+	defer cancel()
+	msgBatch := make([]model.SubmitOrderMsg, 0, 50000)
+	for {
+		m, err := r.ReadMessage(ctx)
+		if err != nil {
+			break
+		}
+		var order model.SubmitOrderMsg
+		if err := json.Unmarshal(m.Value, &order); err == nil {
+			msgBatch = append(msgBatch, order)
+		}
+		if len(msgBatch) >= 50000 {
+			break
+		}
+	}
+	return msgBatch
 }
 
 func batchInsertOrders(orders []model.SubmitOrderMsg) {
@@ -310,8 +338,8 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				trade.Timestamp = time.Now().UnixMilli()
 				trade.EngineID = engineID
 				trade.TradeID = fmt.Sprintf("trade-%s-%d-%d", symbol, time.Now().UnixMilli(), i)
-				// 优化推送内���，增加 version、server_time、node_id 字段
-				// ��一 message_id（trade_id + 时间戳 + 随机数）
+				// 优化推送，增加 version、server_time、node_id 字段
+				//  message_id（trade_id + 时间戳 + 随机数）
 				messageID := fmt.Sprintf("%s-%d-%d", trade.TradeID, trade.Timestamp, time.Now().UnixNano()%10000)
 				// trace_id 可用 order_id + trade_id 拼���
 				traceID := fmt.Sprintf("%s-%s", order.OrderID, trade.TradeID)
@@ -397,7 +425,7 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				m.broadcaster(symbol, msg)
 			}
 
-			// 增量快照推送
+			// ��量快照推送
 			delta := orderBook.DeltaSnapshot(lastSnapshot)
 			if len(delta["bids_delta"].(map[string]string)) > 0 || len(delta["asks_delta"].(map[string]string)) > 0 {
 				deltaResult := map[string]interface{}{
@@ -583,7 +611,7 @@ func saveTradeToKafka(trade model.Trade) {
 
 func saveTradeToDB(trade model.Trade) {
 	if pg.GetPool() == nil {
-		hlog.Warnf("Postgres连接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
+		hlog.Warnf("Postgres��接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
 		return
 	}
 	_, err := pg.GetPool().Exec(context.Background(),
@@ -592,7 +620,7 @@ func saveTradeToDB(trade model.Trade) {
 		trade.TradeID, trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp, trade.TakerOrderID, trade.MakerOrderID, trade.Side, trade.EngineID, trade.TakerUser, trade.MakerUser,
 	)
 	if err != nil {
-		hlog.Errorf("持久化成交到Postgres失败, trade_id=%s, err=%v", trade.TradeID, err)
+		hlog.Errorf("持久化成���到Postgres失败, trade_id=%s, err=%v", trade.TradeID, err)
 	}
 	// 新增K线聚合写入
 	UpdateKlines(trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp/1000)
@@ -683,7 +711,7 @@ const (
 )
 
 // EngineOrderMsg 订单结构体，包含状态、时间、用户等
-// 可扩展更多字段
+// 可扩展���多字段
 // 用于撮合引擎内部流转
 type EngineOrderMsg struct {
 	OrderID   string      `json:"order_id"`
@@ -753,7 +781,7 @@ func httpPost(url string, data []byte) (*http.Response, error) {
 	return client.Do(req)
 }
 
-// GetOrderByID 查询单个订单（优先查数据库）
+// GetOrderByID 查���单个订单（优先查数据库）
 func (m *MatchEngine) GetOrderByID(orderID string) (model.SubmitOrderMsg, error) {
 	order, err := GetOrderByID(orderID)
 	if err != nil {
