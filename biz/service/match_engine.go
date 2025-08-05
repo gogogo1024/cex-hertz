@@ -184,18 +184,48 @@ func saveOrderToKafka(order model.SubmitOrderMsg) {
 
 // Kafka订单消费批量入库相关
 var orderKafkaConsumerClose chan struct{}
+var orderKafkaConsumerWg sync.WaitGroup
 
 func StartOrderKafkaConsumer(topic string) {
 	orderKafkaConsumerClose = make(chan struct{})
 	brokers := conf.GetConf().Kafka.Brokers
 	consumerNum := runtime.NumCPU()
 	for i := 0; i < consumerNum; i++ {
+		orderKafkaConsumerWg.Add(1)
 		go orderKafkaConsumerWorker(i, brokers, topic)
 	}
 }
 
-// 拆分后的worker逻辑
+func StopOrderKafkaConsumer() {
+	close(orderKafkaConsumerClose)
+	orderKafkaConsumerWg.Wait()
+}
+
+func StopOrderKafkaConsumerWithTimeout(timeout time.Duration) {
+	if orderKafkaConsumerClose == nil {
+		return
+	}
+	close(orderKafkaConsumerClose)
+	c := make(chan struct{})
+	go func() {
+		orderKafkaConsumerWg.Wait()
+		close(c)
+	}()
+	select {
+	case <-c:
+		// 正常退出
+	case <-time.After(timeout):
+		hlog.Warnf("StopOrderKafkaConsumer超时退出，可能有未处理完的消息")
+	}
+}
+
 func orderKafkaConsumerWorker(idx int, brokers []string, topic string) {
+	defer func() {
+		if r := recover(); r != nil {
+			hlog.Errorf("[OrderKafkaConsumer-%d] panic: %v\n%s", idx, r, debug.Stack())
+		}
+		orderKafkaConsumerWg.Done()
+	}()
 	r := initOrderKafkaReader(brokers, topic)
 	batch := make([]model.SubmitOrderMsg, 0, 50000)
 	var batchWait time.Duration = 1 * time.Second
@@ -208,10 +238,12 @@ func orderKafkaConsumerWorker(idx int, brokers []string, topic string) {
 			if len(batch) > 0 {
 				batchInsertOrders(batch)
 				batch = batch[:0]
+				// 超时关闭时落盘补偿
+				saveBatchToRedis(idx, batch)
 			}
 			return
 		case <-ticker.C:
-			batchWait, _ = adjustBatchParams(r) // 移除batchMinSize
+			batchWait, _ = adjustBatchParams(r)
 			msgBatch := consumeOrderMessages(r, batchWait)
 			if len(msgBatch) > 0 {
 				batchInsertOrders(msgBatch)
@@ -315,6 +347,8 @@ func batchInsertOrders(orders []model.SubmitOrderMsg) {
 		hlog.Infof("[OrderBatch] 批量插入订单到Postgres成功, 数量: %d", len(orders))
 	}
 }
+
+var tradeBatchForDB []model.Trade
 
 func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg) {
 	defer func() {
@@ -452,6 +486,7 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 					status:   "filled",
 					ts:       trade.Timestamp,
 				})
+				tradeBatchForDB = append(tradeBatchForDB, trade)
 			}
 		} else {
 			hlog.Infof("订单未成交，推送订单簿变更, order_id=%s, symbol=%s", order.OrderID, order.Symbol)
@@ -544,6 +579,10 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				status:   "active",
 				ts:       time.Now().UnixMilli(),
 			})
+		}
+		if len(tradeBatchForDB) > 0 {
+			batchInsertTrades(tradeBatchForDB)
+			tradeBatchForDB = tradeBatchForDB[:0]
 		}
 	}
 	// 批量unicaster优化：合并推送
@@ -642,65 +681,6 @@ func saveTradeToKafka(trade model.Trade) {
 	}
 }
 
-//// K线周期定义
-//var klinePeriods = []string{"1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"}
-//var klinePeriodSeconds = map[string]int64{
-//	"1m":  60,
-//	"5m":  300,
-//	"15m": 900,
-//	"30m": 1800,
-//	"1h":  3600,
-//	"4h":  14400,
-//	"1d":  86400,
-//	"1w":  604800,
-//	"1M":  2592000, // 30天
-//}
-
-// // ��合并写入多周期K线
-//
-//	func updateKlines(db *gorm.DB, symbol, price, qty string, ts int64) {
-//		for _, period := range klinePeriods {
-//			bucket := ts / klinePeriodSeconds[period] * klinePeriodSeconds[period]
-//			var k model.Kline
-//			err := db.Where("symbol = ? AND period = ? AND timestamp = ?", symbol, period, bucket).First(&k).Error
-//			if err == gorm.ErrRecordNotFound {
-//				// 新K线
-//				k = model.Kline{
-//					symbol:      symbol,
-//					Period:    period,
-//					Timestamp: bucket,
-//					Open:      price,
-//					Close:     price,
-//					High:      price,
-//					Low:       price,
-//					Volume:    qty,
-//				}
-//				db.Create(&k)
-//			} else if err == nil {
-//				// 更新K线
-//				if price > k.High {
-//					k.High = price
-//				}
-//				if price < k.Low {
-//					k.Low = price
-//				}
-//				k.Close = price
-//				// 累加成交��
-//				if v, err := strconv.ParseFloat(k.Volume, 64); err == nil {
-//					if q, err := strconv.ParseFloat(qty, 64); err == nil {
-//						k.Volume = strconv.FormatFloat(v+q, 'f', -1, 64)
-//					}
-//				}
-//				db.Save(&k)
-//			}
-//			// 写入Redis
-//			b, _ := json.Marshal(k)
-//			redisKey := "kline:" + symbol + ":" + period
-//			redis.RedisClient.RPush(context.Background(), redisKey, b)
-//			redis.RedisClient.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
-//		}
-//	}
-//
 // ForwardOrderToMatchEngine 转发订单到目的撮合节点（HTTP示例）
 func ForwardOrderToMatchEngine(symbol string, data []byte) error {
 	if consulHelper == nil {
@@ -744,10 +724,43 @@ func saveTradeToDB(trade model.Trade) {
 		trade.TradeID, trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp, trade.TakerOrderID, trade.MakerOrderID, trade.Side, trade.EngineID, trade.TakerUser, trade.MakerUser,
 	)
 	if err != nil {
-		hlog.Errorf("持久化成���到Postgres失败, trade_id=%s, err=%v", trade.TradeID, err)
+		hlog.Errorf("持久化到Postgres失败, trade_id=%s, err=%v", trade.TradeID, err)
 	}
 	// 新增K线聚合写入
 	UpdateKlines(trade.Symbol, trade.Price, trade.Quantity, trade.Timestamp/1000)
+}
+
+// 新增批量入库方法
+func batchInsertTrades(trades []model.Trade) {
+	if pg.GetPool() == nil || len(trades) == 0 {
+		return
+	}
+	query := "INSERT INTO trades (trade_id, symbol, price, quantity, timestamp, taker_order_id, maker_order_id, side, engine_id, taker_user, maker_user) VALUES "
+	args := make([]interface{}, 0, len(trades)*11)
+	valueStrings := make([]string, 0, len(trades))
+	for i, trade := range trades {
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*11+1, i*11+2, i*11+3, i*11+4, i*11+5, i*11+6, i*11+7, i*11+8, i*11+9, i*11+10, i*11+11))
+		args = append(args,
+			trade.TradeID,
+			trade.Symbol,
+			trade.Price,
+			trade.Quantity,
+			trade.Timestamp,
+			trade.TakerOrderID,
+			trade.MakerOrderID,
+			trade.Side,
+			trade.EngineID,
+			trade.TakerUser,
+			trade.MakerUser,
+		)
+	}
+	query += strings.Join(valueStrings, ",")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := pg.GetPool().Exec(ctx, query, args...)
+	if err != nil {
+		hlog.Errorf("批量插入trades到Postgres失败: %v", err)
+	}
 }
 
 // 优雅处理 bids/asks nil 为 []
@@ -849,4 +862,54 @@ type EngineOrderMsg struct {
 	UpdatedAt int64       `json:"updated_at"`
 	FilledQty string      `json:"filled_qty"`
 	ErrMsg    string      `json:"err_msg,omitempty"`
+}
+
+// Redis补偿落盘
+func saveBatchToRedis(workerID int, batch []model.SubmitOrderMsg) {
+	if len(batch) == 0 {
+		return
+	}
+	ctx := context.Background()
+	key := fmt.Sprintf("order_compensate_batch:%d", workerID)
+	val, err := json.Marshal(batch)
+	if err != nil {
+		hlog.Errorf("[Compensate] worker-%d batch序列化失败: %v", workerID, err)
+		return
+	}
+	err = redis.Client.Set(ctx, key, val, 24*time.Hour).Err()
+	if err != nil {
+		hlog.Errorf("[Compensate] worker-%d batch写入Redis失败: %v", workerID, err)
+	} else {
+		hlog.Infof("[Compensate] worker-%d batch已写入Redis补偿, 数量=%d", workerID, len(batch))
+	}
+}
+
+// 启动时自动恢复Redis补偿数据
+func RestoreCompensateBatchFromRedis() {
+	ctx := context.Background()
+	iter := redis.Client.Scan(ctx, 0, "order_compensate_batch:*", 100).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		val, err := redis.Client.Get(ctx, key).Bytes()
+		if err != nil {
+			hlog.Errorf("[Compensate] 读取补偿key %s 失败: %v", key, err)
+			continue
+		}
+		var batch []model.SubmitOrderMsg
+		if err := json.Unmarshal(val, &batch); err != nil {
+			hlog.Errorf("[Compensate] 补偿key %s 反序列化失败: %v", key, err)
+			continue
+		}
+		if len(batch) > 0 {
+			// 推送Kafka
+			for _, order := range batch {
+				saveOrderToKafka(order)
+			}
+			hlog.Infof("[Compensate] 补偿key %s 已推送Kafka, 数量=%d", key, len(batch))
+		}
+		redis.Client.Del(ctx, key)
+	}
+	if err := iter.Err(); err != nil {
+		hlog.Errorf("[Compensate] Redis补偿key遍历失败: %v", err)
+	}
 }

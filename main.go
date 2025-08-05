@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -31,13 +32,19 @@ func main() {
 	dal.Init()
 	// GORM DB 初始化和自动迁移已由 dal.Init() 内部完成，无需重复初始化
 
-	h := server.Default()
+	h := server.New(
+		server.WithExitWaitTime(10 * time.Second),
+	)
+	// 注册优雅关闭钩子，保证Kafka消费者收尾
+	h.OnShutdown = append(h.OnShutdown, func(ctx context.Context) {
+		service.StopOrderKafkaConsumerWithTimeout(10 * time.Second)
+	})
+
 	hsPort := cfg.Hertz.WsPort
 	if len(hsPort) > 0 && hsPort[0] == ':' {
 		hsPort = hsPort[1:]
 	}
 	wsServer := cexserver.NewWebSocketServer(":" + hsPort)
-
 	defer h.Shutdown(context.Background())
 	defer wsServer.Shutdown(context.Background())
 
@@ -46,6 +53,7 @@ func main() {
 	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topics["trade"])
 	// 初始化订单Kafka Writer和消费者（批量入库）
 	service.InitOrderKafkaWriter(cfg.Kafka.Topics["order"])
+	service.RestoreCompensateBatchFromRedis()
 	service.StartOrderKafkaConsumer(cfg.Kafka.Topics["order"])
 
 	// 初始化 Consul 并注册撮合引擎节点
