@@ -78,6 +78,9 @@ func main() {
 	rootHandler.SetEngine(matchEngine)
 	cexserver.InjectEngine(matchEngine)
 
+	// 注入撮合结果 websocket 推送方法，避免循环依赖
+	service.MatchResultPusher = cexserver.PushMatchResult
+
 	// 启动基于 Consul 分布式锁的 K 线补偿定时任务
 	if consulHelper.Client() != nil {
 		service.StartKlineCompensateTask(consulHelper.Client())

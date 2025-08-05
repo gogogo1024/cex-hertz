@@ -2,7 +2,7 @@
 <!DOCTYPE tsung SYSTEM "/usr/local/Cellar/tsung/1.8.0/share/tsung/tsung-1.0.dtd">
 <tsung version="1.0">
     <clients>
-        <client host="localhost" use_controller_vm="true" maxusers="25000"/>
+        <client host="localhost" use_controller_vm="true" maxusers="1000" />
     </clients>
 
 
@@ -16,12 +16,6 @@
         </arrivalphase>
     </load>
 
-    <options>
-        <option name="ts_websocket"/>
-        <option name="loglevel" value="debug"/>
-        <option name="websocket_auto_close" value="true"/> <!-- 自动关闭连接 -->
-    </options>
-
     <sessions>
         <session name="ws_submit_order" probability="100" type="ts_websocket">
             <!-- 1. 建立WebSocket连接（握手） -->
@@ -33,7 +27,7 @@
             <thinktime value="0.5" random="true"/> <!-- 握手后等待0~1秒，模拟真实用户 -->
 
             <!-- 2. 生成动态用户ID（可选，用于区分不同用户） -->
-            <setdynvars sourcetype="random_string" length="6">
+            <setdynvars sourcetype="random_number" length="16">
                 <var name="uid"/>
             </setdynvars>
 
@@ -42,7 +36,7 @@
                 <transaction name="submit_order">
                     <request>
                         <websocket type="message">
-                            <![CDATA[{"action":"SubmitOrder","symbol":"BTCUSDT","side":"buy","price":"10000","quantity":"1","user_id":"user_%%_uid%%"}]]>
+                            <![CDATA[{"action":"SubmitOrder","symbol":"BTCUSDT","side":"buy","price":"10000","quantity":"1","user_id":"user_${uid}"}]]>
                         </websocket>
                     </request>
                 </transaction>

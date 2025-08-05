@@ -44,7 +44,8 @@ type MatchEngine struct {
 }
 
 var (
-	consulHelper *ConsulHelper
+	consulHelper      *ConsulHelper
+	MatchResultPusher func(msgType, symbol, orderID, price, quantity, status string, ts int64)
 )
 
 // 内存订单存储结构
@@ -198,7 +199,6 @@ func orderKafkaConsumerWorker(idx int, brokers []string, topic string) {
 	r := initOrderKafkaReader(brokers, topic)
 	batch := make([]model.SubmitOrderMsg, 0, 50000)
 	var batchWait time.Duration = 1 * time.Second
-	var batchMinSize = 1000
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	hlog.Infof("[OrderKafkaConsumer-%d] Kafka Reader初始化: topic=%s, groupID=%s, brokers=%v", idx, topic, "order-db-writer", brokers)
@@ -211,9 +211,9 @@ func orderKafkaConsumerWorker(idx int, brokers []string, topic string) {
 			}
 			return
 		case <-ticker.C:
-			batchWait, batchMinSize = adjustBatchParams(r)
+			batchWait, _ = adjustBatchParams(r) // 移除batchMinSize
 			msgBatch := consumeOrderMessages(r, batchWait)
-			if len(msgBatch) >= batchMinSize {
+			if len(msgBatch) > 0 {
 				batchInsertOrders(msgBatch)
 			}
 		default:
@@ -248,11 +248,11 @@ func adjustBatchParams(r *kafka.Reader) (time.Duration, int) {
 	stats := r.Stats()
 	lag := stats.Lag
 	if lag > 20000 {
-		return 100 * time.Millisecond, 100
+		return 100 * time.Millisecond, 0
 	} else if lag > 5000 {
-		return 500 * time.Millisecond, 500
+		return 500 * time.Millisecond, 0
 	}
-	return 1 * time.Second, 1000
+	return 1 * time.Second, 0
 }
 
 func consumeOrderMessages(r *kafka.Reader, batchWait time.Duration) []model.SubmitOrderMsg {
@@ -327,6 +327,16 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 	engineID := "node-1" // 可通过配置或环境变量设置
 	hlog.Infof("撮合线程启动, symbol=%s, engine_id=%s", symbol, engineID)
 	var lastSnapshot = &OrderBookSnapshot{Bids: map[string]string{}, Asks: map[string]string{}}
+	var batchResults []struct {
+		msgType  string
+		symbol   string
+		orderID  string
+		price    string
+		quantity string
+		status   string
+		ts       int64
+	}
+	userMsgMap := make(map[string][][]byte) // userID -> 多条消息
 	for order := range queue {
 		hlog.Infof("撮合订单, order_id=%s, symbol=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Symbol, order.Side, order.Price, order.Quantity)
 		trades, filled := orderBook.Match(order)
@@ -338,70 +348,122 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				trade.Timestamp = time.Now().UnixMilli()
 				trade.EngineID = engineID
 				trade.TradeID = fmt.Sprintf("trade-%s-%d-%d", symbol, time.Now().UnixMilli(), i)
-				// 优化推送，增加 version、server_time、node_id 字段
-				//  message_id（trade_id + 时间戳 + 随机数）
 				messageID := fmt.Sprintf("%s-%d-%d", trade.TradeID, trade.Timestamp, time.Now().UnixNano()%10000)
-				// trace_id 可用 order_id + trade_id 拼���
 				traceID := fmt.Sprintf("%s-%s", order.OrderID, trade.TradeID)
-				result := map[string]interface{}{
-					"channel": symbol,
-					"type":    "trade",
-					"data": map[string]interface{}{
-						"trade_id":    trade.TradeID,
-						"symbol":      trade.Symbol,
-						"price":       trade.Price,
-						"quantity":    trade.Quantity,
-						"side":        trade.Side,
-						"taker_order": trade.TakerOrderID,
-						"maker_order": trade.MakerOrderID,
-						"taker_user":  trade.TakerUser,
-						"maker_user":  trade.MakerUser,
-						"timestamp":   trade.Timestamp,
-						"engine_id":   trade.EngineID,
-					},
-					"order_ctx": map[string]interface{}{
-						"order_id": order.OrderID,
-						"side":     order.Side,
-						"price":    order.Price,
-						"quantity": order.Quantity,
-					},
-					"version":     1,
-					"server_time": time.Now().UnixMilli(),
-					"node_id":     engineID,
-					"message_id":  messageID,
-					"trace_id":    traceID,
+				// 手动拼接 JSON 字符串，避免 json.Marshal 分配
+				buf := engine.BufferPool.Get().(*bytes.Buffer)
+				buf.Reset()
+				buf.WriteString(`{"type":"trade","symbol":"`)
+				buf.WriteString(trade.Symbol)
+				buf.WriteString(`","data":{`)
+				buf.WriteString(`"trade_id":"`)
+				buf.WriteString(trade.TradeID)
+				buf.WriteString(`","price":"`)
+				buf.WriteString(trade.Price)
+				buf.WriteString(`","quantity":"`)
+				buf.WriteString(trade.Quantity)
+				buf.WriteString(`","side":"`)
+				buf.WriteString(trade.Side)
+				buf.WriteString(`","taker_order_id":"`)
+				buf.WriteString(trade.TakerOrderID)
+				buf.WriteString(`","maker_order_id":"`)
+				buf.WriteString(trade.MakerOrderID)
+				buf.WriteString(`","taker_user":"`)
+				buf.WriteString(trade.TakerUser)
+				buf.WriteString(`","maker_user":"`)
+				buf.WriteString(trade.MakerUser)
+				buf.WriteString(`","timestamp":`)
+				buf.WriteString(fmt.Sprintf("%d", trade.Timestamp))
+				buf.WriteString(`,"engine_id":"`)
+				buf.WriteString(trade.EngineID)
+				buf.WriteString(`"},"order_ctx":{`)
+				buf.WriteString(`"order_id":"`)
+				buf.WriteString(order.OrderID)
+				buf.WriteString(`","side":"`)
+				buf.WriteString(order.Side)
+				buf.WriteString(`","price":"`)
+				buf.WriteString(order.Price)
+				buf.WriteString(`","quantity":"`)
+				buf.WriteString(order.Quantity)
+				buf.WriteString(`"},"version":1,"server_time":`)
+				buf.WriteString(fmt.Sprintf("%d", time.Now().UnixMilli()))
+				buf.WriteString(`,"node_id":"`)
+				buf.WriteString(engineID)
+				buf.WriteString(`","message_id":"`)
+				buf.WriteString(messageID)
+				buf.WriteString(`","trace_id":"`)
+				buf.WriteString(traceID)
+				buf.WriteString(`"}`)
+				// trade 消息推送优化：WebSocket 异步推送，Kafka 异步批量
+				msg := engine.MsgBytePool.Get().([]byte)
+				if cap(msg) < buf.Len() {
+					msg = make([]byte, buf.Len())
 				}
-				msg, err := json.Marshal(result)
-				if err == nil {
+				msg = msg[:buf.Len()]
+				copy(msg, buf.Bytes())
+				// WebSocket 异步推送
+				_ = engine.BroadcastPool.Submit(func() {
 					m.broadcaster(symbol, msg)
-					// 单播给撮合双方
-					if trade.TakerUser != "" {
-						m.unicaster(trade.TakerUser, msg)
-					}
-					if trade.MakerUser != "" && trade.MakerUser != trade.TakerUser {
-						m.unicaster(trade.MakerUser, msg)
-					}
+				})
+				if trade.TakerUser != "" {
+					userMsgMap[trade.TakerUser] = append(userMsgMap[trade.TakerUser], msg)
 				}
-				// 持久化到 Kafka
-				saveTradeToKafka(trade)
-				// 持久化到 PostgreSQL
+				if trade.MakerUser != "" && trade.MakerUser != trade.TakerUser {
+					userMsgMap[trade.MakerUser] = append(userMsgMap[trade.MakerUser], msg)
+				}
+				engine.MsgBytePool.Put(msg)
+				engine.BufferPool.Put(buf)
+				// Kafka 异步推送
+				go saveTradeToKafka(trade)
 				saveTradeToDB(trade)
-				// 缓存成交记录到 Redis
 				cacheTrade(symbol, trade, 100)
 				hlog.Infof("成交回报, trade_id=%s, symbol=%s, price=%s, quantity=%s", trade.TradeID, trade.Symbol, trade.Price, trade.Quantity)
+				batchResults = append(batchResults, struct {
+					msgType  string
+					symbol   string
+					orderID  string
+					price    string
+					quantity string
+					status   string
+					ts       int64
+				}{
+					msgType:  "trade",
+					symbol:   trade.Symbol,
+					orderID:  trade.TakerOrderID,
+					price:    trade.Price,
+					quantity: trade.Quantity,
+					status:   "filled",
+					ts:       trade.Timestamp,
+				})
+				batchResults = append(batchResults, struct {
+					msgType  string
+					symbol   string
+					orderID  string
+					price    string
+					quantity string
+					status   string
+					ts       int64
+				}{
+					msgType:  "trade",
+					symbol:   trade.Symbol,
+					orderID:  trade.MakerOrderID,
+					price:    trade.Price,
+					quantity: trade.Quantity,
+					status:   "filled",
+					ts:       trade.Timestamp,
+				})
 			}
 		} else {
 			hlog.Infof("订单未成交，推送订单簿变更, order_id=%s, symbol=%s", order.OrderID, order.Symbol)
-			// 未成交，推送订单簿变更
 			depth := orderBook.DepthSnapshot()
 			bids, _ = depth["buys"]
 			asks, _ = depth["sells"]
-			version := time.Now().UnixMilli() // ��时间戳做快照版本
+			version := time.Now().UnixMilli()
 			messageID := fmt.Sprintf("%s-%d-%d", order.OrderID, version, time.Now().UnixNano()%10000)
 			traceID := fmt.Sprintf("%s-%d", order.OrderID, version)
 			result := map[string]interface{}{
 				"channel": symbol,
-				"type":    "depth_update",
+				"msgType": "depth_update",
 				"data": map[string]interface{}{
 					"bids":      bids,
 					"asks":      asks,
@@ -424,13 +486,11 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 			if err == nil {
 				m.broadcaster(symbol, msg)
 			}
-
-			// ��量快照推送
 			delta := orderBook.DeltaSnapshot(lastSnapshot)
 			if len(delta["bids_delta"].(map[string]string)) > 0 || len(delta["asks_delta"].(map[string]string)) > 0 {
 				deltaResult := map[string]interface{}{
 					"channel": symbol,
-					"type":    "depth_delta",
+					"msgType": "depth_delta",
 					"data":    delta,
 					"order_ctx": map[string]interface{}{
 						"order_id": order.OrderID,
@@ -449,8 +509,6 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 					m.broadcaster(symbol, deltaMsg)
 				}
 			}
-			// 新 lastSnapshot
-			// 重新生成全量 bids/asks map，增加类型断言保护，防止panic
 			bidsSlice, okBids := bids.([]map[string]string)
 			if !okBids || bidsSlice == nil {
 				bidsSlice = []map[string]string{}
@@ -468,9 +526,42 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 				newAsks[a["price"]] = a["quantity"]
 			}
 			lastSnapshot = &OrderBookSnapshot{Bids: newBids, Asks: newAsks}
+			cacheOrderBookSnapshot(symbol, bids, asks)
+			batchResults = append(batchResults, struct {
+				msgType  string
+				symbol   string
+				orderID  string
+				price    string
+				quantity string
+				status   string
+				ts       int64
+			}{
+				msgType:  "active",
+				symbol:   order.Symbol,
+				orderID:  order.OrderID,
+				price:    order.Price,
+				quantity: order.Quantity,
+				status:   "active",
+				ts:       time.Now().UnixMilli(),
+			})
 		}
-		// 缓存订单簿快照到 Redis
-		cacheOrderBookSnapshot(symbol, bids, asks)
+	}
+	// 批量unicaster优化：合并推送
+	for userID, msgs := range userMsgMap {
+		if len(msgs) == 1 {
+			m.unicaster(userID, msgs[0])
+		} else if len(msgs) > 1 {
+			// 合并多条消息为一个数组推送
+			batchMsg, err := json.Marshal(msgs)
+			if err == nil {
+				m.unicaster(userID, batchMsg)
+			}
+		}
+	}
+	if MatchResultPusher != nil {
+		for _, r := range batchResults {
+			MatchResultPusher(r.msgType, r.symbol, r.orderID, r.price, r.quantity, r.status, r.ts)
+		}
 	}
 }
 
@@ -565,50 +656,83 @@ func saveTradeToKafka(trade model.Trade) {
 //	"1M":  2592000, // 30天
 //}
 
-//// ��合并写入多周期K线
-//func updateKlines(db *gorm.DB, symbol, price, qty string, ts int64) {
-//	for _, period := range klinePeriods {
-//		bucket := ts / klinePeriodSeconds[period] * klinePeriodSeconds[period]
-//		var k model.Kline
-//		err := db.Where("symbol = ? AND period = ? AND timestamp = ?", symbol, period, bucket).First(&k).Error
-//		if err == gorm.ErrRecordNotFound {
-//			// 新K线
-//			k = model.Kline{
-//				symbol:      symbol,
-//				Period:    period,
-//				Timestamp: bucket,
-//				Open:      price,
-//				Close:     price,
-//				High:      price,
-//				Low:       price,
-//				Volume:    qty,
-//			}
-//			db.Create(&k)
-//		} else if err == nil {
-//			// 更新K线
-//			if price > k.High {
-//				k.High = price
-//			}
-//			if price < k.Low {
-//				k.Low = price
-//			}
-//			k.Close = price
-//			// 累加成交��
-//			if v, err := strconv.ParseFloat(k.Volume, 64); err == nil {
-//				if q, err := strconv.ParseFloat(qty, 64); err == nil {
-//					k.Volume = strconv.FormatFloat(v+q, 'f', -1, 64)
+// // ��合并写入多周期K线
+//
+//	func updateKlines(db *gorm.DB, symbol, price, qty string, ts int64) {
+//		for _, period := range klinePeriods {
+//			bucket := ts / klinePeriodSeconds[period] * klinePeriodSeconds[period]
+//			var k model.Kline
+//			err := db.Where("symbol = ? AND period = ? AND timestamp = ?", symbol, period, bucket).First(&k).Error
+//			if err == gorm.ErrRecordNotFound {
+//				// 新K线
+//				k = model.Kline{
+//					symbol:      symbol,
+//					Period:    period,
+//					Timestamp: bucket,
+//					Open:      price,
+//					Close:     price,
+//					High:      price,
+//					Low:       price,
+//					Volume:    qty,
 //				}
+//				db.Create(&k)
+//			} else if err == nil {
+//				// 更新K线
+//				if price > k.High {
+//					k.High = price
+//				}
+//				if price < k.Low {
+//					k.Low = price
+//				}
+//				k.Close = price
+//				// 累加成交��
+//				if v, err := strconv.ParseFloat(k.Volume, 64); err == nil {
+//					if q, err := strconv.ParseFloat(qty, 64); err == nil {
+//						k.Volume = strconv.FormatFloat(v+q, 'f', -1, 64)
+//					}
+//				}
+//				db.Save(&k)
 //			}
-//			db.Save(&k)
+//			// 写入Redis
+//			b, _ := json.Marshal(k)
+//			redisKey := "kline:" + symbol + ":" + period
+//			redis.RedisClient.RPush(context.Background(), redisKey, b)
+//			redis.RedisClient.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
 //		}
-//		// 写入Redis
-//		b, _ := json.Marshal(k)
-//		redisKey := "kline:" + symbol + ":" + period
-//		redis.RedisClient.RPush(context.Background(), redisKey, b)
-//		redis.RedisClient.LTrim(context.Background(), redisKey, -1000, -1) // 只保留最新1000条
 //	}
-//}
+//
+// ForwardOrderToMatchEngine 转发订单到目的撮合节点（HTTP示例）
+func ForwardOrderToMatchEngine(symbol string, data []byte) error {
+	if consulHelper == nil {
+		return fmt.Errorf("consul not initialized")
+	}
+	nodes, err := consulHelper.DiscoverMatchEngine(symbol)
+	if err != nil || len(nodes) == 0 {
+		return fmt.Errorf("no match engine found for symbol %s", symbol)
+	}
+	// 随机选择一个节点实现负载均衡
+	idx := rand.Intn(len(nodes))
+	url := fmt.Sprintf("http://%s:%d/submit_order", nodes[idx].Address, nodes[idx].Port)
+	resp, err := httpPost(url, data)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("remote match engine error: %s", resp.Status)
+	}
+	return nil
+}
 
+// httpPost 简单HTTP POST封装
+func httpPost(url string, data []byte) (*http.Response, error) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return client.Do(req)
+}
 func saveTradeToDB(trade model.Trade) {
 	if pg.GetPool() == nil {
 		hlog.Warnf("Postgres��接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
@@ -711,7 +835,7 @@ const (
 )
 
 // EngineOrderMsg 订单结构体，包含状态、时间、用户等
-// 可扩展���多字段
+// 可扩展多字段
 // 用于撮合引擎内部流转
 type EngineOrderMsg struct {
 	OrderID   string      `json:"order_id"`
@@ -726,108 +850,3 @@ type EngineOrderMsg struct {
 	FilledQty string      `json:"filled_qty"`
 	ErrMsg    string      `json:"err_msg,omitempty"`
 }
-
-// 判断本节点是否负责该symbol
-// 建议迁移到 util.go 工具函数文件���
-// func IsLocalMatchEngine(symbol string) bool {
-// 	if consulHelper == nil {
-// 		return true // 未启用Consul则全部��地处理
-// 	}
-// 	return isLocalSymbol(symbol)
-// }
-
-// isLocalSymbol 判断symbol是否属于本节点
-// ���议迁移到 util.go 工具函数文件中
-// func isLocalSymbol(symbol string) bool {
-// 	symbols := getLocalsymbols(cfg)
-// 	for _, p := range symbols {
-// 		if p == symbol {
-// 			return true
-// 		}
-// 	}
-// 	return false
-// }
-
-// ForwardOrderToMatchEngine 转发订单到目��撮合节点（HTTP示例）
-func ForwardOrderToMatchEngine(symbol string, data []byte) error {
-	if consulHelper == nil {
-		return fmt.Errorf("consul not initialized")
-	}
-	nodes, err := consulHelper.DiscoverMatchEngine(symbol)
-	if err != nil || len(nodes) == 0 {
-		return fmt.Errorf("no match engine found for symbol %s", symbol)
-	}
-	// 随机选择一个节点实现负载均衡
-	idx := rand.Intn(len(nodes))
-	url := fmt.Sprintf("http://%s:%d/submit_order", nodes[idx].Address, nodes[idx].Port)
-	resp, err := httpPost(url, data)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("remote match engine error: %s", resp.Status)
-	}
-	return nil
-}
-
-// httpPost 简单HTTP POST封装
-func httpPost(url string, data []byte) (*http.Response, error) {
-	client := &http.Client{Timeout: 3 * time.Second}
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	return client.Do(req)
-}
-
-// GetOrderByID 查���单个订单（优先查数据库）
-func (m *MatchEngine) GetOrderByID(orderID string) (model.SubmitOrderMsg, error) {
-	order, err := GetOrderByID(orderID)
-	if err != nil {
-		return model.SubmitOrderMsg{}, err
-	}
-	return model.SubmitOrderMsg{
-		OrderID:  order.OrderID,
-		UserID:   order.UserID,
-		Symbol:   order.Symbol,
-		Side:     order.Side,
-		Price:    order.Price,
-		Quantity: order.Quantity,
-	}, nil
-}
-
-// ListOrders 查询订单列表（优先查数据库）
-func (m *MatchEngine) ListOrders(userID, status string) ([]model.SubmitOrderMsg, error) {
-	rows, err := ListOrders(userID, status)
-	if err != nil {
-		return nil, err
-	}
-	var result []model.SubmitOrderMsg
-	for _, row := range rows {
-		result = append(result, model.SubmitOrderMsg{
-			OrderID:  row.OrderID,
-			UserID:   row.UserID,
-			Symbol:   row.Symbol,
-			Side:     row.Side,
-			Price:    row.Price,
-			Quantity: row.Quantity,
-		})
-	}
-	return result, nil
-}
-
-// CancelOrder 取消订单（持久化状态到数据库）
-func (m *MatchEngine) CancelOrder(orderID, userID string) (string, error) {
-	order, err := m.GetOrderByID(orderID)
-	if err != nil || order.UserID != userID {
-		return "not_found", err
-	}
-	err = UpdateOrderStatus(orderID, "cancelled")
-	if err != nil {
-		return "error", err
-	}
-	return "cancelled", nil
-}
-
-// 在撮合成功、订单状态变化等需要单播时调用 m.unicaster(userID, msg)

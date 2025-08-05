@@ -56,12 +56,10 @@ func init() {
 			MsgBuf: make(map[string]chan []byte),
 		}
 	}
-	// 初始化 goroutine 池，最大协程数可根据实际并发调整
-	pool, err := ants.NewPool(1024)
-	if err != nil {
+	// 初始化 ants goroutine 池（全局池，供 engine.BroadcastPool 使用）
+	if err := engine.InitBroadcastPool(1024); err != nil {
 		panic(err)
 	}
-	broadcastPool = pool
 }
 
 // 启动symbol消息分发 goroutine
@@ -219,18 +217,22 @@ func getDroppedKafkaWriter(topic string) *kafka.Writer {
 }
 
 // PushMatchResult 复杂消息组装示例：撮合结果推送
-func PushMatchResult(symbol string, orderID string, price string, quantity string, ts int64) {
+func PushMatchResult(msgType string, symbol string, orderID string, price string, quantity string, status string, ts int64) {
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	buf.WriteString(`{"symbol":"`)
 	buf.WriteString(symbol)
-	buf.WriteString(`","type":"match_result","data":{`)
+	buf.WriteString(`","type":"`)
+	buf.WriteString(msgType)
+	buf.WriteString(`","data":{`)
 	buf.WriteString(`"order_id":"`)
 	buf.WriteString(orderID)
 	buf.WriteString(`","price":"`)
 	buf.WriteString(price)
 	buf.WriteString(`","quantity":"`)
 	buf.WriteString(quantity)
+	buf.WriteString(`","status":"`)
+	buf.WriteString(status)
 	buf.WriteString(`","ts":`)
 	buf.WriteString(fmt.Sprintf("%d", ts))
 	buf.WriteString("}}")
@@ -398,4 +400,29 @@ func Unicast(userID string, msg []byte) {
 			_ = conn.WriteMessage(websocket.TextMessage, msg)
 		}
 	}
+}
+
+// PushUnicastMsg 优化版单播消息组装与发送，复用 bufferPool 和 msgBytePool
+func PushUnicastMsg(userID string, msgType string, data map[string]any) {
+	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.WriteString(`{"type":"`)
+	buf.WriteString(msgType)
+	buf.WriteString(`","data":`)
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		buf.WriteString(`{}`)
+	} else {
+		buf.Write(jsonData)
+	}
+	buf.WriteString("}")
+	msg := msgBytePool.Get().([]byte)
+	if cap(msg) < buf.Len() {
+		msg = make([]byte, buf.Len())
+	}
+	msg = msg[:buf.Len()]
+	copy(msg, buf.Bytes())
+	Unicast(userID, msg)
+	msgBytePool.Put(msg)
+	bufferPool.Put(buf)
 }

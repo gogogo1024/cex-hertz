@@ -20,7 +20,7 @@ build:
 
 .PHONY: benchmark-tsung
 benchmark-tsung:
-	tsung -f benchmark/tsung.xml start
+	tsung -f benchmark/tsung.xml start  -env ERL_MAX_PORTS 300000  -env ERL_MAX_PROCESSES 300000
 
 PHONY: benchmark-tsung-report
 benchmark-tsung-report:
