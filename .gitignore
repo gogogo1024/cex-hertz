@@ -1,4 +1,30 @@
-# 忽略 Go 构建产物
+# ===================
+# 操作系统/通用
+# ===================
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.lock
+*.rar
+*.zip
+*.gz
+*.psd
+*.bmd
+*.cfg
+*.pptx
+
+# ===================
+# Go 相关
+# ===================
+*.exe
+*.exe~
+*.test
+*.out
+*.prof
+*.coverprofile
+coverage.out
+profile.cov
 *.o
 *.a
 *.so
@@ -12,76 +38,68 @@ _cgo_defun.c
 _cgo_gotypes.go
 _cgo_export.*
 _testmain.go
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
-*.test
-*.prof
-
-# 忽略常见压缩包和临时文件
-*.rar
-*.zip
-*.gz
-*.psd
-*.bmd
-*.cfg
-*.pptx
-*.log
-*nohup.out
-*settings.pyc
-*.sublime-project
-*.sublime-workspace
-!.gitkeep
-.DS_Store
-
-# Code coverage profiles and other test artifacts
-*.out
-coverage.*
-# 忽略 IDE 配置
-/.idea
-/.vscode
-
-# 忽略输出目录
-/output
-
-# 忽略本地配置和环境文件
-*.local.yml
-dumped_hertz_remote_config.json
-.env
-.env.*
-
-# 忽略数据库和数据快照
-*.db
-*.sqlite
-*.sqlite3
-*.bak
-*.tmp
-
-# 忽略 coverage 文件
-coverage.out
-*.coverprofile
-profile.cov
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
 go.work
 go.work.sum
 
-# env file
-.env
+# ===================
+# 数据库/数据文件
+# ===================
+*.db
+*.sqlite
+*.sqlite3
+*.h2.db
 
-# Editor/IDE
-# .idea/
-# .vscode/
-# 其他
+# ===================
+# Scala/Metals/Bloop/Scala CLI
+# ===================
+.metals/
+.bloop/
+.scala-build/
+.bsp/
+project/
+*.class
+*.jar
+.cache/
+
+# ===================
+# Gatling
+# ===================
+results/
+
+# ===================
+# Node.js/前端
+# ===================
 node_modules/
+dist/
+
+# ===================
+# Python
+# ===================
+__pycache__/
+*.pyc
+settings.pyc
+
+# ===================
+# 编辑器/IDE
+# ===================
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# ===================
+# 环境/配置
+# ===================
+.env
+*.local.yml
+
+# ===================
+# 日志目录
+# ===================
+log/
+
+# ===================
+# 其他
+# ===================
+/output
+!.gitkeep

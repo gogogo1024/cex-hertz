@@ -1,0 +1,4 @@
+[project]
+name = "cex-benchmark"
+version = "0.1.0"
+scala = "3.3.6"
