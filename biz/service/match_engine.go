@@ -36,31 +36,29 @@ type Engine interface {
 // 实际业务可扩展为分 symbol 的撮合线程池
 
 type MatchEngine struct {
-	// 每个交易对一个撮合队列
-	orderQueues map[string]chan model.SubmitOrderMsg
-	mu          sync.RWMutex
+	// 每个交易对一个撮合队列，使用 sync.Map 替换 map，减少锁竞争
+	orderQueues sync.Map // key: symbol, value: chan model.SubmitOrderMsg
 	broadcaster engine.Broadcaster
 	unicaster   engine.Unicaster
 }
+
+// 内存订单存储结构，全部用 sync.Map 替换，减少锁粒度
+var (
+	orderStore   sync.Map // orderID -> model.SubmitOrderMsg
+	userOrderMap sync.Map // userID -> []orderID
+	orderStatus  sync.Map // orderID -> status
+)
 
 var (
 	consulHelper      *ConsulHelper
 	MatchResultPusher func(msgType, symbol, orderID, price, quantity, status string, ts int64)
 )
 
-// 内存订单存储结构
-var (
-	orderStore   = make(map[string]model.SubmitOrderMsg) // orderID -> order
-	userOrderMap = make(map[string][]string)             // userID -> []orderID
-	orderStatus  = make(map[string]string)               // orderID -> status
-	storeMu      sync.RWMutex
-)
-
 func NewMatchEngine(broadcaster engine.Broadcaster, unicaster engine.Unicaster) *MatchEngine {
 	return &MatchEngine{
-		orderQueues: make(map[string]chan model.SubmitOrderMsg),
 		broadcaster: broadcaster,
 		unicaster:   unicaster,
+		orderQueues: sync.Map{},
 	}
 }
 
@@ -76,7 +74,6 @@ func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, symbols []st
 
 // SubmitOrder 持久化到Kafka，由独立消费者批量入库
 func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
-	// 后端生成唯一订单ID
 	id, err := util.GenerateOrderID()
 	if err != nil {
 		hlog.Errorf("生成订单ID失败: %v", err)
@@ -85,21 +82,33 @@ func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	order.OrderID = fmt.Sprintf("%d", id)
 
 	hlog.Infof("SubmitOrder called, order_id=%s, symbol=%s, side=%s, price=%s, quantity=%s", order.OrderID, order.Symbol, order.Side, order.Price, order.Quantity)
-	m.mu.Lock()
-	queue, ok := m.orderQueues[order.Symbol]
+	// 优先尝试获取队列，无需全局锁
+	queueAny, ok := m.orderQueues.Load(order.Symbol)
+	var queue chan model.SubmitOrderMsg
 	if !ok {
-		queue = make(chan model.SubmitOrderMsg, 10000) // 每个交易对一个队列
-		m.orderQueues[order.Symbol] = queue
-		// 启动独立撮合 worker goroutine
-		go m.matchWorker(order.Symbol, queue)
+		// 双重检查锁，防止并发创建
+		newQueue := make(chan model.SubmitOrderMsg, 10000) // 可配置
+		actual, loaded := m.orderQueues.LoadOrStore(order.Symbol, newQueue)
+		if !loaded {
+			queue = newQueue
+			go m.matchWorker(order.Symbol, queue)
+		} else {
+			queue = actual.(chan model.SubmitOrderMsg)
+		}
+	} else {
+		queue = queueAny.(chan model.SubmitOrderMsg)
 	}
-	m.mu.Unlock()
-
-	storeMu.Lock()
-	orderStore[order.OrderID] = order
-	userOrderMap[order.UserID] = append(userOrderMap[order.UserID], order.OrderID)
-	orderStatus[order.OrderID] = "active"
-	storeMu.Unlock()
+	// 内存订单存储优化
+	orderStore.Store(order.OrderID, order)
+	// userOrderMap: append 需加锁，避免并发问题
+	userOrderMu := getUserOrderMutex(order.UserID)
+	userOrderMu.Lock()
+	val, _ := userOrderMap.LoadOrStore(order.UserID, []string{})
+	orderIDs := val.([]string)
+	orderIDs = append(orderIDs, order.OrderID)
+	userOrderMap.Store(order.UserID, orderIDs)
+	userOrderMu.Unlock()
+	orderStatus.Store(order.OrderID, "active")
 
 	// 持久化到Kafka，由独立消费者批量入库
 	saveOrderToKafka(order)
@@ -761,6 +770,14 @@ func batchInsertTrades(trades []model.Trade) {
 	if err != nil {
 		hlog.Errorf("批量插入trades到Postgres失败: %v", err)
 	}
+}
+
+// 用户订单锁map，防止并发append
+var userOrderMuMap sync.Map // userID -> *sync.Mutex
+
+func getUserOrderMutex(userID string) *sync.Mutex {
+	muIface, _ := userOrderMuMap.LoadOrStore(userID, &sync.Mutex{})
+	return muIface.(*sync.Mutex)
 }
 
 // 优雅处理 bids/asks nil 为 []

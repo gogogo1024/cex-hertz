@@ -2,48 +2,88 @@
 <!DOCTYPE tsung SYSTEM "/usr/local/Cellar/tsung/1.8.0/share/tsung/tsung-1.0.dtd">
 <tsung version="1.0">
     <clients>
-        <client host="localhost" use_controller_vm="true" maxusers="1000" />
+        <client host="localhost" use_controller_vm="true" maxusers="5000" />
     </clients>
-
 
     <servers>
         <server host="127.0.0.1" port="9997" type="tcp"/>
     </servers>
 
     <load>
-        <arrivalphase phase="1" duration="100" unit="second">
-            <users interarrival="0.001" unit="second"/> <!-- 降低用户创建频率（每秒1000个） -->
+        <arrivalphase phase="1" duration="10" unit="second">
+            <users interarrival="0.01" unit="second"/> <!-- 降低压力，先验证功能 -->
         </arrivalphase>
     </load>
 
     <sessions>
-        <session name="ws_submit_order" probability="100" type="ts_websocket">
-            <!-- 1. 建立WebSocket连接（握手） -->
+        <!-- 买入订单会话 -->
+        <session name="ws_submit_order" probability="50" type="ts_websocket">
             <request>
                 <websocket type="connect" path="/ws"/>
             </request>
+            <thinktime value="1"/>
 
-            <!-- 关键优化：添加固定等待时间，确保握手完成 -->
-            <thinktime value="0.5" random="true"/> <!-- 握手后等待0~1秒，模拟真实用户 -->
-
-            <!-- 2. 生成动态用户ID（可选，用于区分不同用户） -->
+            <!-- 生成用户ID（16位数字） -->
             <setdynvars sourcetype="random_number" length="16">
                 <var name="uid"/>
             </setdynvars>
 
-            <!-- 3. 发送业务消息（仅在握手后执行） -->
+            <!-- 生成买入价格（10000-10010） -->
+            <setdynvars sourcetype="random_number" start="10000" end="10010">
+                <var name="buy_price"/>
+            </setdynvars>
+
+            <!-- 生成数量（1-3） -->
+            <setdynvars sourcetype="random_number" start="1" end="3">
+                <var name="qty"/>
+            </setdynvars>
+
+            <!-- 发送买入订单（使用Tsung最原始的变量格式） -->
+            <transaction name="submit_order_buy">
+                <request>
+                    <websocket type="message">
+                        <![CDATA[{"action":"SubmitOrder","symbol":"BTCUSDT","side":"buy","price":"%%buy_price%%","quantity":"%%qty%%","user_id":"user_%%uid%%"}]]>
+                    </websocket>
+                </request>
+            </transaction>
+            <thinktime value="1"/>
+
+            <request>
+                <websocket type="close"/>
+            </request>
+        </session>
+
+        <!-- 卖出订单会话 -->
+        <session name="ws_submit_order_sell" probability="50" type="ts_websocket">
+            <request>
+                <websocket type="connect" path="/ws"/>
+            </request>
+            <thinktime value="1"/>
+
+            <!-- 生成用户ID -->
+            <setdynvars sourcetype="random_number" length="16">
+                <var name="uid"/>
+            </setdynvars>
+
             <for from="1" to="1" var="i">
-                <transaction name="submit_order">
+                <!-- 生成卖出价格（10005-10015） -->
+                <setdynvars sourcetype="random_number" start="10005" end="10015">
+                    <var name="sell_price"/>
+                </setdynvars>
+                <!-- 生成数量（1-3） -->
+                <setdynvars sourcetype="random_number" start="1" end="3">
+                    <var name="qty"/>
+                </setdynvars>
+                <!-- 发送卖出订单 -->
+                <transaction name="submit_order_sell">
                     <request>
                         <websocket type="message">
-                            <![CDATA[{"action":"SubmitOrder","symbol":"BTCUSDT","side":"buy","price":"10000","quantity":"1","user_id":"user_${uid}"}]]>
+                            <![CDATA[{"action":"SubmitOrder","symbol":"BTCUSDT","side":"sell","price":"${sell_price}","quantity":"${qty}","user_id":"user_${uid}"}]]>
                         </websocket>
                     </request>
                 </transaction>
-                <thinktime value="1" random="true"/> <!-- 业务消息后等待0~2秒，模拟真实用户 -->
+                <thinktime value="1"/>
             </for>
-
-            <!-- 4. 显式关闭连接（建议添加） -->
             <request>
                 <websocket type="close"/>
             </request>
