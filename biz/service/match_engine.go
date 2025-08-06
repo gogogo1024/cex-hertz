@@ -146,7 +146,8 @@ func batchOrderKafkaWriter() {
 		case order := <-orderBatchChan:
 			msgBytes, err := json.Marshal(order)
 			if err == nil {
-				batch = append(batch, kafka.Message{Value: msgBytes})
+				// 设置 symbol 作为 Kafka 消息 key，实现分区路由
+				batch = append(batch, kafka.Message{Key: []byte(order.Symbol), Value: msgBytes})
 			}
 			if len(batch) >= 100 {
 				flushOrderKafkaBatch(&batch)

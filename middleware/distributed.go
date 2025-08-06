@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"cex-hertz/biz/service"
-	"cex-hertz/biz/util"
 	"context"
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
@@ -10,7 +9,8 @@ import (
 )
 
 // DistributedRouteMiddleware 是分布式撮合自动路由中间件
-func DistributedRouteMiddleware() app.HandlerFunc {
+// 支持动态分区扩展：根据 PartitionManager 的分区表动态判断 symbol 是否本地处理
+func DistributedRouteMiddleware(pm *service.PartitionManager, localAddr string) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		hlog.Infof("[DistributedRouteMiddleware] path=%s, method=%s", c.Path(), c.Request.Method())
 		// 只拦截 /api/order 下单接口
@@ -29,7 +29,25 @@ func DistributedRouteMiddleware() app.HandlerFunc {
 				c.Abort()
 				return
 			}
-			if !util.IsLocalMatchEngine(symbol) {
+
+			// 动态分区路由：判断 symbol 是否由本地 worker 负责
+			pt := pm.GetPartitionTable()
+			partitionID, ok := pt.SymbolToPartition[symbol]
+			if !ok {
+				hlog.Errorf("[DistributedRouteMiddleware] symbol not found in partition table: %s", symbol)
+				c.String(404, "symbol not found")
+				c.Abort()
+				return
+			}
+			partition := pt.Partitions[partitionID]
+			isLocal := false
+			for _, addr := range partition.Workers {
+				if addr == localAddr {
+					isLocal = true
+					break
+				}
+			}
+			if !isLocal {
 				hlog.Infof("[DistributedRouteMiddleware] forward order for symbol=%s", symbol)
 				if err := service.ForwardOrderToMatchEngine(symbol, c.Request.Body()); err != nil {
 					hlog.Errorf("order forward failed: %v", err)
