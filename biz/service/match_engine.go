@@ -6,6 +6,7 @@ import (
 	kafkaDal "cex-hertz/biz/dal/kafka"
 	"cex-hertz/biz/dal/pg"
 	"cex-hertz/biz/dal/redis"
+	rocksdbCompensate "cex-hertz/biz/dal/rocksdb"
 	"cex-hertz/biz/engine"
 	"cex-hertz/biz/model"
 	"cex-hertz/conf"
@@ -69,6 +70,8 @@ func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, symbols []st
 		return err
 	}
 	hlog.Infof("MatchEngine节点已注册到Consul, nodeID=%s, symbols=%v, port=%d", nodeID, symbols, port)
+	// 自动恢复本地补偿订单
+	recoverCompensateOrders()
 	return nil
 }
 
@@ -166,6 +169,7 @@ func batchOrderKafkaWriter() {
 	}
 }
 
+// flushOrderKafkaBatch，带本地补偿逻辑
 func flushOrderKafkaBatch(batch *[]kafka.Message) {
 	if len(*batch) == 0 {
 		hlog.Infof("[OrderKafkaBatch] flushOrderKafkaBatch被调用，但batch为空")
@@ -180,6 +184,13 @@ func flushOrderKafkaBatch(batch *[]kafka.Message) {
 	err := writer.WriteMessages(context.Background(), (*batch)...)
 	if err != nil {
 		hlog.Errorf("[OrderKafkaBatch] 写入Kafka失败，topic=%v，err=%v", orderKafkaTopic, err)
+		// 失败时本地补偿
+		for _, msg := range *batch {
+			var order model.SubmitOrderMsg
+			if err := json.Unmarshal(msg.Value, &order); err == nil {
+				_ = rocksdbCompensate.SaveOrderCompensate(order.OrderID, order)
+			}
+		}
 	} else {
 		hlog.Infof("[OrderKafkaBatch] 写入Kafka成功，topic=%v，消息数量=%d", orderKafkaTopic, len(*batch))
 	}
@@ -329,7 +340,7 @@ func batchInsertOrders(orders []model.SubmitOrderMsg) {
 	if len(orders) == 0 {
 		return
 	}
-	// 构造原生多值INSERT语句
+	// 构造原生多值INSERT语句，增加幂等性：order_id唯一，冲突时忽略
 	query := "INSERT INTO orders (order_id, user_id, symbol, side, price, quantity, status, created_at, updated_at) VALUES "
 	args := make([]interface{}, 0, len(orders)*9)
 	valueStrings := make([]string, 0, len(orders))
@@ -348,6 +359,8 @@ func batchInsertOrders(orders []model.SubmitOrderMsg) {
 		)
 	}
 	query += strings.Join(valueStrings, ",")
+	// 增加 ON CONFLICT(order_id) DO NOTHING 保证幂等
+	query += " ON CONFLICT(order_id) DO NOTHING"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := pg.GetPool().Exec(ctx, query, args...)
@@ -614,6 +627,98 @@ func (m *MatchEngine) matchWorker(symbol string, queue chan model.SubmitOrderMsg
 	}
 }
 
+// PartitionAwareMatchEngine 支持动态感知分区变更的撮合引擎
+// localAddr: 本 worker 节点地址
+// pm: PartitionManager
+
+type PartitionAwareMatchEngine struct {
+	*MatchEngine
+	pm        *PartitionManager
+	localAddr string
+	ctx       context.Context
+	cancel    context.CancelFunc
+}
+
+// NewPartitionAwareMatchEngine 创建支持动态分区的撮合引擎
+func NewPartitionAwareMatchEngine(pm *PartitionManager, localAddr string, broadcaster engine.Broadcaster, unicaster engine.Unicaster) *PartitionAwareMatchEngine {
+	ctx, cancel := context.WithCancel(context.Background())
+	pa := &PartitionAwareMatchEngine{
+		MatchEngine: NewMatchEngine(broadcaster, unicaster),
+		pm:          pm,
+		localAddr:   localAddr,
+		ctx:         ctx,
+		cancel:      cancel,
+	}
+	go pa.watchPartitionChange()
+	return pa
+}
+
+// watchPartitionChange 持续监听分区表变更，动态订阅/退订 symbol
+func (pa *PartitionAwareMatchEngine) watchPartitionChange() {
+	pa.pm.WatchPartitionTable(pa.ctx)
+	var lastSymbols map[string]struct{}
+	for {
+		select {
+		case <-pa.ctx.Done():
+			return
+		default:
+			pt := pa.pm.GetPartitionTable()
+			mySymbols := make(map[string]struct{})
+			for _, partition := range pt.Partitions {
+				for _, addr := range partition.Workers {
+					if addr == pa.localAddr {
+						for _, symbol := range partition.Symbols {
+							mySymbols[symbol] = struct{}{}
+						}
+					}
+				}
+			}
+			// 订阅新 symbol
+			for symbol := range mySymbols {
+				if lastSymbols == nil || lastSymbols[symbol] == struct{}{} {
+					continue
+				}
+				// 新 symbol，初始化撮合队列
+				_, loaded := pa.orderQueues.LoadOrStore(symbol, make(chan model.SubmitOrderMsg, 10000))
+				if !loaded {
+					go pa.matchWorker(symbol, pa.getOrderQueue(symbol))
+				}
+			}
+			// 退订不再负责的 symbol
+			if lastSymbols != nil {
+				for symbol := range lastSymbols {
+					if _, ok := mySymbols[symbol]; !ok {
+						pa.closeOrderQueue(symbol)
+						pa.orderQueues.Delete(symbol)
+					}
+				}
+			}
+			lastSymbols = mySymbols
+		}
+	}
+}
+
+// getOrderQueue 获取 symbol 的撮合队列
+func (pa *PartitionAwareMatchEngine) getOrderQueue(symbol string) chan model.SubmitOrderMsg {
+	q, _ := pa.orderQueues.Load(symbol)
+	return q.(chan model.SubmitOrderMsg)
+}
+
+// closeOrderQueue 优雅关闭 symbol 的撮合队列
+func (pa *PartitionAwareMatchEngine) closeOrderQueue(symbol string) {
+	q, ok := pa.orderQueues.Load(symbol)
+	if ok {
+		ch := q.(chan model.SubmitOrderMsg)
+		close(ch)
+	}
+}
+
+// Stop 停止分区监听
+func (pa *PartitionAwareMatchEngine) Stop() {
+	pa.cancel()
+	pa.pm.StopWatch()
+}
+
 // OrderBook 及其相关方法已全部迁移至 orderbook.go，仅保留类型引用和必要的调用。
 // 工具函数：字符串数量比较、加减
 func toFloat(s string) float64 {
@@ -680,7 +785,7 @@ func flushKafkaBatch(batch *[]kafka.Message) {
 	}
 	err := kafkaWriter.WriteMessages(context.Background(), (*batch)...)
 	if err != nil {
-		hlog.Errorf("批量写入Kafka失败: %v", err)
+		hlog.Errorf("批量写入Kafka���败: %v", err)
 	}
 	*batch = (*batch)[:0]
 }
@@ -773,54 +878,65 @@ func batchInsertTrades(trades []model.Trade) {
 	}
 }
 
-// 用户订单锁map，防止并发append
-var userOrderMuMap sync.Map // userID -> *sync.Mutex
-
-func getUserOrderMutex(userID string) *sync.Mutex {
-	muIface, _ := userOrderMuMap.LoadOrStore(userID, &sync.Mutex{})
-	return muIface.(*sync.Mutex)
-}
-
-// 优雅处理 bids/asks nil 为 []
-func safeSlice[T any](s []T) []T {
-	if s == nil {
-		return []T{}
+// 自动恢复本地补偿订单并重试写入Kafka
+func RecoverCompensateOrders() {
+	orders, err := rocksdbCompensate.GetAllOrderCompensates()
+	if err != nil {
+		hlog.Errorf("[CompensateRecover] 获取本地补偿订单失败: %v", err)
+		return
 	}
-	return s
-}
-
-// 缓存订单簿快照到 Redis
-func cacheOrderBookSnapshot(symbol string, bids, asks interface{}) {
-	ctx := context.Background()
-	key := "orderbook:" + symbol
-
-	// 尝试将 bids/asks 转为 []map[string]string 类型并安全处理
-	var safeBids, safeAsks interface{} = bids, asks
-	if b, ok := bids.([]map[string]string); ok {
-		safeBids = safeSlice(b)
-	}
-	if a, ok := asks.([]map[string]string); ok {
-		safeAsks = safeSlice(a)
-	}
-
-	val, err := json.Marshal(map[string]interface{}{"bids": safeBids, "asks": safeAsks})
-	if err == nil {
-		err := redis.Client.Set(ctx, key, val, 5*time.Second).Err()
-		if err != nil {
-			hlog.Errorf("Redis Set 失败: %v", err)
+	for orderID, comp := range orders {
+		if comp.RetryCount >= rocksdbCompensate.MaxRetryCount {
+			hlog.Errorf("[CompensateRecover] 补偿订单重试次数超限, orderID=%s, retryCount=%d，请人工介入", orderID, comp.RetryCount)
+			continue
+		}
+		var order model.SubmitOrderMsg
+		if err := json.Unmarshal(comp.OrderJSON, &order); err != nil {
+			hlog.Errorf("[CompensateRecover] 补偿订单反序列化失败, orderID=%s, err=%v", orderID, err)
+			continue
+		}
+		err := tryWriteOrderToKafka(order)
+		if err == nil {
+			if err := rocksdbCompensate.DeleteOrderCompensate(orderID); err != nil {
+				hlog.Errorf("[CompensateRecover] 删除本地补偿失败, orderID=%s, err=%v", orderID, err)
+			}
+		} else {
+			hlog.Errorf("[CompensateRecover] 重试写入Kafka失败, orderID=%s, err=%v", orderID, err)
+			// 写入失败，更新重试次数和时间戳
+			if err := rocksdbCompensate.UpdateOrderCompensateRetry(orderID, comp); err != nil {
+				hlog.Errorf("[CompensateRecover] 更新补偿重试信息失败, orderID=%s, err=%v", orderID, err)
+			}
 		}
 	}
 }
 
-// 缓存成交记录到 Redis List
-func cacheTrade(symbol string, trade model.Trade, maxLen int64) {
-	ctx := context.Background()
-	key := "trades:" + symbol
-	val, err := json.Marshal(trade)
-	if err == nil {
-		redis.Client.LPush(ctx, key, val)
-		redis.Client.LTrim(ctx, key, 0, maxLen-1)
+// 封装Kafka写入，失败时写入本地补偿
+func tryWriteOrderToKafka(order model.SubmitOrderMsg) error {
+	msgBytes, err := json.Marshal(order)
+	if err != nil {
+		return err
 	}
+	writer := kafkaDal.GetWriter(orderKafkaTopic)
+	if writer == nil {
+		return fmt.Errorf("Kafka writer未初始化")
+	}
+	err = writer.WriteMessages(context.Background(), kafka.Message{Key: []byte(order.Symbol), Value: msgBytes})
+	if err != nil {
+		// 写入失败，落盘补偿
+		err2 := rocksdbCompensate.SaveOrderCompensate(order.OrderID, order)
+		if err2 != nil {
+			hlog.Errorf("[Compensate] 本地补偿写入失败, orderID=%s, err=%v", order.OrderID, err2)
+		}
+		return err
+	}
+	return nil
+}
+
+// 获取用户订单互斥锁，防止并发append
+var userOrderMuMap sync.Map // userID -> *sync.Mutex
+func getUserOrderMutex(userID string) *sync.Mutex {
+	muIface, _ := userOrderMuMap.LoadOrStore(userID, &sync.Mutex{})
+	return muIface.(*sync.Mutex)
 }
 
 // 缓存用户活跃订单ID到 Redis
@@ -834,55 +950,7 @@ func cacheUserActiveOrder(userID, orderID string) {
 	redis.Client.Expire(ctx, key, 24*time.Hour)
 }
 
-// 从 Redis 移除用户活跃订单ID
-func removeUserActiveOrder(userID, orderID string) {
-	if userID == "" || orderID == "" {
-		return
-	}
-	ctx := context.Background()
-	key := "user:active_orders:" + userID
-	redis.Client.SRem(ctx, key, orderID)
-}
-
-// 查询用户活跃订单ID列表
-func GetUserActiveOrders(userID string) ([]string, error) {
-	if userID == "" {
-		return nil, nil
-	}
-	ctx := context.Background()
-	key := "user:active_orders:" + userID
-	return redis.Client.SMembers(ctx, key).Result()
-}
-
-// OrderStatus 订单状态常量
-type OrderStatus string
-
-const (
-	OrderStatusSubmitted  OrderStatus = "submitted"
-	OrderStatusPartFilled OrderStatus = "part_filled"
-	OrderStatusFilled     OrderStatus = "filled"
-	OrderStatusCancelled  OrderStatus = "cancelled"
-	OrderStatusFailed     OrderStatus = "failed"
-)
-
-// EngineOrderMsg 订单结构体，包含状态、时间、用户等
-// 可扩展多字段
-// 用于撮合引擎内部流转
-type EngineOrderMsg struct {
-	OrderID   string      `json:"order_id"`
-	symbol    string      `json:"symbol"`
-	Side      string      `json:"side"`
-	Price     string      `json:"price"`
-	Quantity  string      `json:"quantity"`
-	UserID    string      `json:"user_id,omitempty"`
-	Status    OrderStatus `json:"status"`
-	CreatedAt int64       `json:"created_at"`
-	UpdatedAt int64       `json:"updated_at"`
-	FilledQty string      `json:"filled_qty"`
-	ErrMsg    string      `json:"err_msg,omitempty"`
-}
-
-// Redis补偿落盘
+// 批量补偿数据写入Redis（用于Kafka消费超时等场景）
 func saveBatchToRedis(workerID int, batch []model.SubmitOrderMsg) {
 	if len(batch) == 0 {
 		return
@@ -894,40 +962,47 @@ func saveBatchToRedis(workerID int, batch []model.SubmitOrderMsg) {
 		hlog.Errorf("[Compensate] worker-%d batch序列化失败: %v", workerID, err)
 		return
 	}
-	err = redis.Client.Set(ctx, key, val, 24*time.Hour).Err()
-	if err != nil {
-		hlog.Errorf("[Compensate] worker-%d batch写入Redis失败: %v", workerID, err)
-	} else {
-		hlog.Infof("[Compensate] worker-%d batch已写入Redis补偿, 数量=%d", workerID, len(batch))
+	maxRetry := 3
+	for i := 0; i < maxRetry; i++ {
+		err = redis.Client.Set(ctx, key, val, 24*time.Hour).Err()
+		if err == nil {
+			hlog.Infof("[Compensate] worker-%d batch已写入Redis补偿, 数量=%d", workerID, len(batch))
+			return
+		}
+		hlog.Errorf("[Compensate] worker-%d batch写入Redis失败(第%d次): %v", workerID, i+1, err)
+		time.Sleep(500 * time.Millisecond)
+	}
+	hlog.Errorf("[Compensate] worker-%d batch写入Redis最终失败，需人工介入! 失败订单ID: %v", workerID, extractOrderIDs(batch))
+}
+
+func extractOrderIDs(batch []model.SubmitOrderMsg) []string {
+	ids := make([]string, 0, len(batch))
+	for _, o := range batch {
+		ids = append(ids, o.OrderID)
+	}
+	return ids
+}
+
+// 缓存成交记录到 Redis List
+func cacheTrade(symbol string, trade model.Trade, maxLen int64) {
+	ctx := context.Background()
+	key := "trades:" + symbol
+	val, err := json.Marshal(trade)
+	if err == nil {
+		redis.Client.LPush(ctx, key, val)
+		redis.Client.LTrim(ctx, key, 0, maxLen-1)
 	}
 }
 
-// 启动时自动恢复Redis补偿数据
-func RestoreCompensateBatchFromRedis() {
+// 缓存订单簿快照到 Redis
+func cacheOrderBookSnapshot(symbol string, bids, asks interface{}) {
 	ctx := context.Background()
-	iter := redis.Client.Scan(ctx, 0, "order_compensate_batch:*", 100).Iterator()
-	for iter.Next(ctx) {
-		key := iter.Val()
-		val, err := redis.Client.Get(ctx, key).Bytes()
+	key := "orderbook:" + symbol
+	val, err := json.Marshal(map[string]interface{}{"bids": bids, "asks": asks})
+	if err == nil {
+		err := redis.Client.Set(ctx, key, val, 5*time.Second).Err()
 		if err != nil {
-			hlog.Errorf("[Compensate] 读取补偿key %s 失败: %v", key, err)
-			continue
+			hlog.Errorf("Redis Set 失败: %v", err)
 		}
-		var batch []model.SubmitOrderMsg
-		if err := json.Unmarshal(val, &batch); err != nil {
-			hlog.Errorf("[Compensate] 补偿key %s 反序列化失败: %v", key, err)
-			continue
-		}
-		if len(batch) > 0 {
-			// 推送Kafka
-			for _, order := range batch {
-				saveOrderToKafka(order)
-			}
-			hlog.Infof("[Compensate] 补偿key %s 已推送Kafka, 数量=%d", key, len(batch))
-		}
-		redis.Client.Del(ctx, key)
-	}
-	if err := iter.Err(); err != nil {
-		hlog.Errorf("[Compensate] Redis补偿key遍历失败: %v", err)
 	}
 }

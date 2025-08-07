@@ -23,6 +23,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -53,7 +54,8 @@ func main() {
 	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topics["trade"])
 	// 初始化订单Kafka Writer和消费者（批量入库）
 	service.InitOrderKafkaWriter(cfg.Kafka.Topics["order"])
-	service.RestoreCompensateBatchFromRedis()
+	// 替换为本地RocksDB补偿恢复
+	service.RecoverCompensateOrders()
 	service.StartOrderKafkaConsumer(cfg.Kafka.Topics["order"])
 
 	// 初始化 Consul 并注册撮合引擎节点
@@ -61,27 +63,57 @@ func main() {
 	if len(consulAddrs) == 0 {
 		panic("Consul address list is empty")
 	}
-	nodeID := cfg.MatchEngine.NodeID
-	matchsymbols := cfg.MatchEngine.Matchsymbols
 	matchPort := cfg.MatchEngine.MatchPort
-	symbols := util.Parsesymbols(matchsymbols)
 	// 使用多地址高可用
 	consulHelper, err := service.NewConsulHelperWithAddrs(consulAddrs)
 	if err != nil {
 		panic(err)
 	}
-	if err := service.InitMatchEngineWithHelper(consulHelper, nodeID, symbols, matchPort); err != nil {
-		panic(err)
+
+	// 初始化 PartitionManager，支持多个 Consul 地址
+	pm, err := service.NewPartitionManager(consulAddrs)
+	if err != nil {
+		hlog.Fatalf("初始化 PartitionManager 失败: %v", err)
+	}
+	if err := pm.LoadFromConsul(); err != nil {
+		hlog.Fatalf("加载分区表失败: %v", err)
+	}
+	localIP := util.GetLocalIP()
+	localAddr := localIP + ":" + strconv.Itoa(matchPort)
+	partitionTable := pm.GetPartitionTable()
+	// 动态获取本地 worker 负责的 symbol 列表
+	symbolSet := make(map[string]struct{})
+	for _, p := range partitionTable.Partitions {
+		for _, w := range p.Workers {
+			if w == localAddr {
+				for _, s := range p.Symbols {
+					symbolSet[s] = struct{}{}
+				}
+			}
+		}
+	}
+	symbols := make([]string, 0, len(symbolSet))
+	for s := range symbolSet {
+		symbols = append(symbols, s)
+	}
+	// worker注册到Consul，直接用 localAddr 作为唯一ID
+	if err := consulHelper.RegisterMatchEngine(localAddr, symbols, matchPort); err != nil {
+		hlog.Fatalf("worker注册到Consul失败: %v", err)
 	}
 
-	// 注入撮合引擎的广播和单播回调
+	// 本地 worker 地址（可从配置）
+	//localIP := util.GetLocalIP()
+	//localAddr := localIP + ":" + strconv.Itoa(matchPort)
+	// 初始化撮合引擎，支持动态分区扩展
 	broadcaster := func(symbol string, msg []byte) {
 		cexserver.Broadcast(symbol, msg)
 	}
 	unicast := func(userID string, msg []byte) {
 		cexserver.Unicast(userID, msg)
 	}
-	matchEngine := service.NewMatchEngine(broadcaster, unicast)
+	matchEngine := service.NewPartitionAwareMatchEngine(pm, localAddr, broadcaster, unicast)
+	// 可将 matchEngine 注入到 handler 或 service 层，供下单、撮合等业务调用
+
 	// 注入全局 handler 层撮合引擎实例，避免循环依赖
 	rootHandler.SetEngine(matchEngine)
 	cexserver.InjectEngine(matchEngine)
@@ -93,6 +125,11 @@ func main() {
 	if consulHelper.Client() != nil {
 		service.StartKlineCompensateTask(consulHelper.Client())
 	}
+
+	// 启动自动扩缩容调度器（每分钟检查一次）
+	metrics := &service.MockPartitionMetrics{} // TODO: 替换为真实采集实现
+	autoScaler := service.NewPartitionAutoScaler(pm, metrics, time.Minute)
+	go autoScaler.Run(context.Background())
 
 	registerMiddleware(h)
 	registerRoutes(h)
@@ -147,7 +184,7 @@ func registerMiddleware(h *server.Hertz) {
 func registerRoutes(h *server.Hertz) {
 	h.GET("/ping", handler.Ping)
 	orderGroup := h.Group("/api")
-	orderGroup.Use(middleware.DistributedRouteMiddleware())
+	//orderGroup.Use(middleware.DistributedRouteMiddleware())
 	orderGroup.POST("/order", handler.SubmitOrder)
 	orderGroup.GET("/order/:id", handler.GetOrder)
 	orderGroup.GET("/orders", handler.ListOrders)
