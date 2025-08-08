@@ -3,7 +3,7 @@ package rocksdb
 import (
 	"encoding/json"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
-	"github.com/tecbot/gorocksdb"
+	"github.com/linxGnu/grocksdb"
 	"os"
 	"sync"
 	"time"
@@ -19,10 +19,10 @@ type CompensateOrder struct {
 	LastRetryTime int64           `json:"last_retry_time"`
 }
 
-const MaxRetryCount = 10 // 最大重试次数，可根据需要调整
+const MaxRetryCount = 5 // 最大重试次数，Kafka故障率低，建议设置为5
 
 var (
-	compensateDB     *gorocksdb.DB
+	compensateDB     *grocksdb.DB
 	compensateDBOnce sync.Once
 	compensateDBPath = "data/compensate_rocksdb"
 )
@@ -39,9 +39,9 @@ func Init(path string) error {
 				compensateDBPath = envPath
 			}
 		}
-		opts := gorocksdb.NewDefaultOptions()
+		opts := grocksdb.NewDefaultOptions()
 		opts.SetCreateIfMissing(true)
-		compensateDB, err = gorocksdb.OpenDb(opts, compensateDBPath)
+		compensateDB, err = grocksdb.OpenDb(opts, compensateDBPath)
 	})
 	if err != nil {
 		hlog.Errorf("[RocksDB] 初始化失败: %v", err)
@@ -53,7 +53,7 @@ func Init(path string) error {
 
 // SaveOrderCompensate 写入补偿订单（带重试信息）
 func SaveOrderCompensate(orderID string, order interface{}) error {
-	wo := gorocksdb.NewDefaultWriteOptions()
+	wo := grocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
 	orderJSON, err := json.Marshal(order)
 	if err != nil {
@@ -73,7 +73,7 @@ func SaveOrderCompensate(orderID string, order interface{}) error {
 
 // UpdateOrderCompensateRetry 更新补偿订单的重试次数和时间
 func UpdateOrderCompensateRetry(orderID string, comp *CompensateOrder) error {
-	wo := gorocksdb.NewDefaultWriteOptions()
+	wo := grocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
 	comp.RetryCount++
 	comp.LastRetryTime = time.Now().Unix()
@@ -86,7 +86,7 @@ func UpdateOrderCompensateRetry(orderID string, comp *CompensateOrder) error {
 
 // GetAllOrderCompensates 遍历所有补偿订单，返回CompensateOrder结构
 func GetAllOrderCompensates() (map[string]*CompensateOrder, error) {
-	ro := gorocksdb.NewDefaultReadOptions()
+	ro := grocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
 	it := compensateDB.NewIterator(ro)
 	defer it.Close()
@@ -105,9 +105,9 @@ func GetAllOrderCompensates() (map[string]*CompensateOrder, error) {
 	return result, nil
 }
 
-// DeleteOrderCompensate 删���补偿订单
+// DeleteOrderCompensate 删除补偿订单
 func DeleteOrderCompensate(orderID string) error {
-	wo := gorocksdb.NewDefaultWriteOptions()
+	wo := grocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
 	return compensateDB.Delete(wo, []byte(orderID))
 }

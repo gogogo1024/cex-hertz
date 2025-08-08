@@ -71,7 +71,7 @@ func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, symbols []st
 	}
 	hlog.Infof("MatchEngine节点已注册到Consul, nodeID=%s, symbols=%v, port=%d", nodeID, symbols, port)
 	// 自动恢复本地补偿订单
-	recoverCompensateOrders()
+	RecoverCompensateOrders()
 	return nil
 }
 
@@ -366,6 +366,47 @@ func batchInsertOrders(orders []model.SubmitOrderMsg) {
 	_, err := pg.GetPool().Exec(ctx, query, args...)
 	if err != nil {
 		hlog.Errorf("[OrderBatch] 批量插入订单到Postgres失败: %v", err)
+		// 批量插入失败时，重新投递到Kafka
+		var kafkaMsgs []kafka.Message
+		for _, order := range orders {
+			msgBytes, err := json.Marshal(order)
+			if err != nil {
+				hlog.Errorf("[OrderBatch] 订单序列化失败, orderID=%s, err=%v", order.OrderID, err)
+				continue
+			}
+			kafkaMsgs = append(kafkaMsgs, kafka.Message{Key: []byte(order.Symbol), Value: msgBytes})
+		}
+		if len(kafkaMsgs) > 0 {
+			writer := kafkaDal.GetWriter(orderKafkaTopic)
+			if writer == nil {
+				hlog.Errorf("[OrderBatch] Kafka writer未初始化，无法重投, orders count=%d", len(kafkaMsgs))
+			} else {
+				// 动态分批，单批最大10MB，最多2000条
+				const maxBatchBytes = 10 * 1024 * 1024 // 10MB
+				const maxBatchCount = 2000
+				batch := make([]kafka.Message, 0, maxBatchCount)
+				batchBytes := 0
+				for _, msg := range kafkaMsgs {
+					msgBytes := len(msg.Value) + len(msg.Key)
+					if len(batch) >= maxBatchCount || batchBytes+msgBytes > maxBatchBytes {
+						err = writer.WriteMessages(context.Background(), batch...)
+						if err != nil {
+							hlog.Errorf("[OrderBatch] 批量重投Kafka失败, count=%d, err=%v", len(batch), err)
+						}
+						batch = batch[:0]
+						batchBytes = 0
+					}
+					batch = append(batch, msg)
+					batchBytes += msgBytes
+				}
+				if len(batch) > 0 {
+					err = writer.WriteMessages(context.Background(), batch...)
+					if err != nil {
+						hlog.Errorf("[OrderBatch] 批量重投Kafka失败, count=%d, err=%v", len(batch), err)
+					}
+				}
+			}
+		}
 	} else {
 		hlog.Infof("[OrderBatch] 批量插入订单到Postgres成功, 数量: %d", len(orders))
 	}
@@ -785,7 +826,7 @@ func flushKafkaBatch(batch *[]kafka.Message) {
 	}
 	err := kafkaWriter.WriteMessages(context.Background(), (*batch)...)
 	if err != nil {
-		hlog.Errorf("批量写入Kafka���败: %v", err)
+		hlog.Errorf("批量写入Kafka失败: %v", err)
 	}
 	*batch = (*batch)[:0]
 }
@@ -830,7 +871,7 @@ func httpPost(url string, data []byte) (*http.Response, error) {
 }
 func saveTradeToDB(trade model.Trade) {
 	if pg.GetPool() == nil {
-		hlog.Warnf("Postgres��接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
+		hlog.Warnf("Postgres连接池未初始化，无法持久化成交, trade_id=%s", trade.TradeID)
 		return
 	}
 	_, err := pg.GetPool().Exec(context.Background(),
@@ -878,7 +919,7 @@ func batchInsertTrades(trades []model.Trade) {
 	}
 }
 
-// 自动恢复本地补偿订单并重试写入Kafka
+// RecoverCompensateOrders 自动恢复本地补偿订单并重试写入Kafka
 func RecoverCompensateOrders() {
 	orders, err := rocksdbCompensate.GetAllOrderCompensates()
 	if err != nil {
@@ -994,15 +1035,81 @@ func cacheTrade(symbol string, trade model.Trade, maxLen int64) {
 	}
 }
 
+// 优雅处理 bids/asks nil 为 []
+func safeSlice[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 // 缓存订单簿快照到 Redis
 func cacheOrderBookSnapshot(symbol string, bids, asks interface{}) {
 	ctx := context.Background()
 	key := "orderbook:" + symbol
-	val, err := json.Marshal(map[string]interface{}{"bids": bids, "asks": asks})
+
+	// 尝试将 bids/asks 转为 []map[string]string 类型并安全处理
+	var safeBids, safeAsks interface{} = bids, asks
+	if b, ok := bids.([]map[string]string); ok {
+		safeBids = safeSlice(b)
+	}
+	if a, ok := asks.([]map[string]string); ok {
+		safeAsks = safeSlice(a)
+	}
+
+	val, err := json.Marshal(map[string]interface{}{"bids": safeBids, "asks": safeAsks})
 	if err == nil {
 		err := redis.Client.Set(ctx, key, val, 5*time.Second).Err()
 		if err != nil {
 			hlog.Errorf("Redis Set 失败: %v", err)
 		}
 	}
+}
+
+// 从 Redis 移除用户活跃订单ID
+func removeUserActiveOrder(userID, orderID string) {
+	if userID == "" || orderID == "" {
+		return
+	}
+	ctx := context.Background()
+	key := "user:active_orders:" + userID
+	redis.Client.SRem(ctx, key, orderID)
+}
+
+// 查询用户活跃订单ID列表
+func GetUserActiveOrders(userID string) ([]string, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	ctx := context.Background()
+	key := "user:active_orders:" + userID
+	return redis.Client.SMembers(ctx, key).Result()
+}
+
+// OrderStatus 订单状态常量
+type OrderStatus string
+
+const (
+	OrderStatusSubmitted  OrderStatus = "submitted"
+	OrderStatusPartFilled OrderStatus = "part_filled"
+	OrderStatusFilled     OrderStatus = "filled"
+	OrderStatusCancelled  OrderStatus = "cancelled"
+	OrderStatusFailed     OrderStatus = "failed"
+)
+
+// EngineOrderMsg 订单结构体，包含状态、时间、用户等
+// 可扩展多字段
+// 用于撮合引擎内部流转
+type EngineOrderMsg struct {
+	OrderID   string      `json:"order_id"`
+	symbol    string      `json:"symbol"`
+	Side      string      `json:"side"`
+	Price     string      `json:"price"`
+	Quantity  string      `json:"quantity"`
+	UserID    string      `json:"user_id,omitempty"`
+	Status    OrderStatus `json:"status"`
+	CreatedAt int64       `json:"created_at"`
+	UpdatedAt int64       `json:"updated_at"`
+	FilledQty string      `json:"filled_qty"`
+	ErrMsg    string      `json:"err_msg,omitempty"`
 }

@@ -11,6 +11,5 @@ func Init() {
 	pg.Init()
 	redis.Init()
 	kafka.Init()
-	rocksdb.Init()
-
+	rocksdb.Init("")
 }

@@ -1,4 +1,12 @@
+# 设置 RocksDB 头文件和库路径环境变量
+export CGO_CFLAGS=-I/usr/local/include
+export CGO_LDFLAGS=-L/usr/local/lib -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnappy -llz4 -lzstd
+
+
 DOCKER_COMPOSE_FILE=docker-compose-base.yaml
+.PHONY: gobuild
+gobuild:
+	CGO_ENABLED=1 go build -o bin/cex-hertz main.go
 
 .PHONY: up down restart logs build
 
