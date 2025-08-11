@@ -32,21 +32,19 @@ func GetCurrentPartitionID() string {
 	return os.Getenv("CEX_NODE_ID")
 }
 
-// SymbolMigrationChecker 判断 symbol 是否已迁移到新分区
+// SymbolMigrationChecker 判断 symbol 是否处于迁移期（根据MigrationInfo），并返回新分区ID
 func SymbolMigrationChecker(symbol string) (migrated bool, newPartitionID string) {
 	table := GetPartitionTable()
 	currentID := GetCurrentPartitionID()
-	partitionIDs := table.SymbolToPartition[symbol]
-	if len(partitionIDs) > 1 {
-		// 当前分区不是主分区（第一个），则认为 symbol 已迁移
-		if partitionIDs[0] != currentID {
-			return true, partitionIDs[0]
-		}
+	info, ok := table.MigrationInfo[symbol]
+	if ok && info.Migrating && info.NewPartitionID != "" && currentID != info.NewPartitionID {
+		return true, info.NewPartitionID
 	}
 	return false, ""
 }
 
-// MigrateRedirectHandler 旧分区收到 symbol 的写请求时，判断是否迁移，若迁移则重定向
+// MigrateRedirectHandler （HTTP场景）
+// 用于旧分区收到 symbol 的 HTTP 写请求时，判断是否迁移，若迁移则返回 JSON 重定向响应
 func MigrateRedirectHandler(ctx *app.RequestContext) {
 	symbol := string(ctx.Query("symbol"))
 	migrated, newPartitionID := SymbolMigrationChecker(symbol)

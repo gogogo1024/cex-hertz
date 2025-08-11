@@ -63,18 +63,6 @@ func NewMatchEngine(broadcaster engine.Broadcaster, unicaster engine.Unicaster) 
 	}
 }
 
-// InitMatchEngineWithHelper 支持传入 ConsulHelper 实例，便于多地址高可用
-func InitMatchEngineWithHelper(helper *ConsulHelper, nodeID string, symbols []string, port int) error {
-	consulHelper = helper
-	if err := consulHelper.RegisterMatchEngine(nodeID, symbols, port); err != nil {
-		return err
-	}
-	hlog.Infof("MatchEngine节点已注册到Consul, nodeID=%s, symbols=%v, port=%d", nodeID, symbols, port)
-	// 自动恢复本地补偿订单
-	RecoverCompensateOrders()
-	return nil
-}
-
 // SubmitOrder 持久化到Kafka，由独立消费者批量入库
 func (m *MatchEngine) SubmitOrder(order model.SubmitOrderMsg) {
 	id, err := util.GenerateOrderID()

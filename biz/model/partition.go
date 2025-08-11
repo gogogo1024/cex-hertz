@@ -12,12 +12,22 @@ type Partition struct {
 	Workers []string `json:"workers"`
 }
 
-// PartitionTable 维护 symbol 到分区的多对多映射
-// Key: symbol, Value: 分区ID列表
+// SymbolMigrationInfo 记录 symbol 的迁移状态和新分区ID
+// 可在分区扩缩容时动态维护
+// Key: symbol
+// Value: {migrating: bool, newPartitionID: string}
+type SymbolMigrationInfo struct {
+	Migrating      bool   `json:"migrating"`
+	NewPartitionID string `json:"new_partition_id"`
+}
 
+// PartitionTable 维护 symbol 到分区的多对多映射和迁移状态
+// Key: symbol, Value: 分区ID列表
+// MigrationInfo: symbol 的迁移状态表
 type PartitionTable struct {
-	SymbolToPartition map[string][]string   `json:"symbol_to_partition"`
-	Partitions        map[string]*Partition `json:"partitions"`
+	SymbolToPartition map[string][]string             `json:"symbol_to_partition"`
+	Partitions        map[string]*Partition           `json:"partitions"`
+	MigrationInfo     map[string]*SymbolMigrationInfo `json:"migration_info"`
 }
 
 // NewPartitionTable 创建空分区表
@@ -25,6 +35,7 @@ func NewPartitionTable() *PartitionTable {
 	return &PartitionTable{
 		SymbolToPartition: make(map[string][]string),
 		Partitions:        make(map[string]*Partition),
+		MigrationInfo:     make(map[string]*SymbolMigrationInfo),
 	}
 }
 
@@ -59,8 +70,35 @@ func (pt *PartitionTable) DeepCopy() *PartitionTable {
 	for k, v := range pt.Partitions {
 		newPartitions[k] = v.DeepCopy()
 	}
+	newMigrationInfo := make(map[string]*SymbolMigrationInfo, len(pt.MigrationInfo))
+	for k, v := range pt.MigrationInfo {
+		newMigrationInfo[k] = &SymbolMigrationInfo{
+			Migrating:      v.Migrating,
+			NewPartitionID: v.NewPartitionID,
+		}
+	}
 	return &PartitionTable{
 		SymbolToPartition: newSymbolToPartition,
 		Partitions:        newPartitions,
+		MigrationInfo:     newMigrationInfo,
 	}
+}
+
+// GetSymbolsForWorker 返回指定 worker 负责的所有 symbol（去重）
+func (pt *PartitionTable) GetSymbolsForWorker(workerAddr string) []string {
+	symbolSet := make(map[string]struct{})
+	for _, partition := range pt.Partitions {
+		for _, worker := range partition.Workers {
+			if worker == workerAddr {
+				for _, symbol := range partition.Symbols {
+					symbolSet[symbol] = struct{}{}
+				}
+			}
+		}
+	}
+	var symbols []string
+	for symbol := range symbolSet {
+		symbols = append(symbols, symbol)
+	}
+	return symbols
 }

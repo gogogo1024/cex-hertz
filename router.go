@@ -4,7 +4,6 @@ package main
 
 import (
 	handler "cex-hertz/biz/handler"
-	"cex-hertz/middleware"
 	"github.com/cloudwego/hertz/pkg/app/server"
 )
 
@@ -13,6 +12,6 @@ func customizedRegister(r *server.Hertz) {
 	r.GET("/ping", handler.Ping)
 
 	orderGroup := r.Group("/api")
-	orderGroup.Use(middleware.DistributedRouteMiddleware())
+	//orderGroup.Use(middleware.DistributedRouteMiddleware())
 	orderGroup.POST("/order", handler.SubmitOrder)
 }

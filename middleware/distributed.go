@@ -32,18 +32,24 @@ func DistributedRouteMiddleware(pm *service.PartitionManager, localAddr string) 
 
 			// 动态分区路由：判断 symbol 是否由本地 worker 负责
 			pt := pm.GetPartitionTable()
-			partitionID, ok := pt.SymbolToPartition[symbol]
-			if !ok {
+			partitionIDs, ok := pt.SymbolToPartition[symbol]
+			if !ok || len(partitionIDs) == 0 {
 				hlog.Errorf("[DistributedRouteMiddleware] symbol not found in partition table: %s", symbol)
 				c.String(404, "symbol not found")
 				c.Abort()
 				return
 			}
-			partition := pt.Partitions[partitionID]
+			// 遍历所有分区，判断本地 worker 是否负责该 symbol
 			isLocal := false
-			for _, addr := range partition.Workers {
-				if addr == localAddr {
-					isLocal = true
+			for _, partitionID := range partitionIDs {
+				partition := pt.Partitions[partitionID]
+				for _, addr := range partition.Workers {
+					if addr == localAddr {
+						isLocal = true
+						break
+					}
+				}
+				if isLocal {
 					break
 				}
 			}

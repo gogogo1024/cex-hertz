@@ -3,8 +3,9 @@ package server
 import (
 	"bytes"
 	"cex-hertz/biz/engine"
+	"cex-hertz/biz/handler"
 	"cex-hertz/biz/model"
-	"cex-hertz/biz/util"
+	"cex-hertz/biz/service"
 	"cex-hertz/conf"
 	"cex-hertz/middleware"
 	"context"
@@ -280,14 +281,14 @@ func InjectEngine(e engine.Engine) {
 }
 
 // NewWebSocketServer WebSocket 服务端
-func NewWebSocketServer(addr string) *server.Hertz {
+func NewWebSocketServer(addr string, pm *service.PartitionManager, localAddr string) *server.Hertz {
 	h := server.Default(server.WithHostPorts(addr))
 	h.NoHijackConnPool = true
 
 	h.GET("/ws", func(ctx context.Context, c *app.RequestContext) {
 		log.Printf("[WS] /ws handler called, path=%s, method=%s", c.Path(), c.Request.Method())
-		// 分布式路由中间件逻辑迁移到ws
-		middleware.DistributedRouteMiddleware()(ctx, c)
+		// 分布式路由中间件逻辑迁移到ws，传递 pm 和 localAddr
+		middleware.DistributedRouteMiddleware(pm, localAddr)(ctx, c)
 		if c.IsAborted() {
 			log.Printf("[WS] connection aborted by DistributedRouteMiddleware, path=%s", c.Path())
 			return
@@ -352,12 +353,11 @@ func NewWebSocketServer(addr string) *server.Hertz {
 						log.Printf("invalid SubmitOrder: %v", err)
 						continue
 					}
-					if !util.IsLocalMatchEngine(symbol) {
-						log.Printf("[WS] SubmitOrder: symbol %s not local, should forward or reject", symbol)
-						ack := []byte(`{"type":"order_forwarded","symbol":"` + symbol + `"}`)
-						if err := conn.WriteMessage(mt, ack); err != nil {
-							log.Printf("order forward ack error: %v", err)
-						}
+					// 集成迁移重定向逻辑
+					migrated, newPartitionID := handler.SymbolMigrationChecker(symbol)
+					if migrated {
+						// 迁移期间重定向，统一调用 WebSocket 场景的 MigrateWSRedirectHandler
+						handler.MigrateWSRedirectHandler(conn, mt, symbol, newPartitionID)
 						continue
 					}
 					if matchEngine != nil {
@@ -380,7 +380,7 @@ func NewWebSocketServer(addr string) *server.Hertz {
 	return h
 }
 
-// 用户ID到连接的映射
+// 用户ID到��接的映射
 var userConnMap sync.Map // map[userID]*websocket.Conn
 
 // RegisterUserConn 注册用户和连接的关系（需在用户登录或鉴权后调用）

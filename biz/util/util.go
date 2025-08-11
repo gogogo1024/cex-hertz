@@ -1,37 +1,9 @@
 package util
 
 import (
-	"cex-hertz/conf"
 	"net"
 	"os"
 )
-
-// IsLocalMatchEngine 判断本节点是否负责该symbol
-func IsLocalMatchEngine(symbol string) bool {
-	cfg := conf.GetConf()
-	return isLocalSymbol(symbol, cfg)
-}
-
-// isLocalSymbol 判断 symbol 是否属于本节点
-func isLocalSymbol(symbol string, cfg *conf.Config) bool {
-	for _, p := range Parsesymbols(cfg.MatchEngine.Matchsymbols) {
-		if p == symbol {
-			return true
-		}
-	}
-	return false
-}
-
-// Parsesymbols 工具函数，解析逗号分隔的交易对字符串
-func Parsesymbols(s string) []string {
-	var res []string
-	for _, p := range splitAndTrim(s, ",") {
-		if p != "" {
-			res = append(res, p)
-		}
-	}
-	return res
-}
 
 func splitAndTrim(s, sep string) []string {
 	var res []string

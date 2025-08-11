@@ -8,7 +8,6 @@ import (
 	"cex-hertz/biz/service"
 	"cex-hertz/biz/util"
 	"cex-hertz/conf"
-	rootHandler "cex-hertz/handler"
 	"cex-hertz/middleware"
 	cexserver "cex-hertz/server"
 	"context"
@@ -45,10 +44,6 @@ func main() {
 	if len(hsPort) > 0 && hsPort[0] == ':' {
 		hsPort = hsPort[1:]
 	}
-	wsServer := cexserver.NewWebSocketServer(":" + hsPort)
-	defer h.Shutdown(context.Background())
-	defer wsServer.Shutdown(context.Background())
-
 	// 初始化 Postgres 连接池（如有需要可调用对应初始化）
 	// 初始化 Kafka Writer
 	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topics["trade"])
@@ -78,24 +73,18 @@ func main() {
 	if err := pm.LoadFromConsul(); err != nil {
 		hlog.Fatalf("加载分区表失败: %v", err)
 	}
+	// 获取本地IP和端口，生成 localAddr
 	localIP := util.GetLocalIP()
 	localAddr := localIP + ":" + strconv.Itoa(matchPort)
 	partitionTable := pm.GetPartitionTable()
-	// 动态获取本地 worker 负责的 symbol 列表
-	symbolSet := make(map[string]struct{})
-	for _, p := range partitionTable.Partitions {
-		for _, w := range p.Workers {
-			if w == localAddr {
-				for _, s := range p.Symbols {
-					symbolSet[s] = struct{}{}
-				}
-			}
-		}
-	}
-	symbols := make([]string, 0, len(symbolSet))
-	for s := range symbolSet {
-		symbols = append(symbols, s)
-	}
+	// 获取当前 worker 负责的 symbol 列表，调用 PartitionTable 的新方法
+	symbols := partitionTable.GetSymbolsForWorker(localAddr)
+
+	// 创建 WebSocketServer 时传递 pm 和 localAddr
+	wsServer := cexserver.NewWebSocketServer(":"+hsPort, pm, localAddr)
+	defer h.Shutdown(context.Background())
+	defer wsServer.Shutdown(context.Background())
+
 	// worker注册到Consul，直接用 localAddr 作为唯一ID
 	if err := consulHelper.RegisterMatchEngine(localAddr, symbols, matchPort); err != nil {
 		hlog.Fatalf("worker注册到Consul失败: %v", err)
@@ -115,7 +104,7 @@ func main() {
 	// 可将 matchEngine 注入到 handler 或 service 层，供下单、撮合等业务调用
 
 	// 注入全局 handler 层撮合引擎实例，避免循环依赖
-	rootHandler.SetEngine(matchEngine)
+	//rootHandler.SetEngine(matchEngine)
 	cexserver.InjectEngine(matchEngine)
 
 	// 注入撮合结果 websocket 推送方法，避免循环依赖

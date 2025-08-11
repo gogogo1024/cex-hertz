@@ -41,7 +41,7 @@ func ListOrders(userID, status string) ([]model.Order, error) {
 	return orders, err
 }
 
-// CreateOrder 插入订单（结构��方式）
+// CreateOrder 插入订单（结构方式）
 func CreateOrder(order *model.Order) error {
 	return GormDB.Create(order).Error
 }
