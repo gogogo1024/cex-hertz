@@ -103,3 +103,4 @@ log/
 # ===================
 /output
 !.gitkeep
+gateway-server

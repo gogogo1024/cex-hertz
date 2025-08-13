@@ -7,9 +7,9 @@ package model
 // 可根据实际需要扩展更多元数据字段
 
 type Partition struct {
-	ID      string   `json:"id"`
-	Symbols []string `json:"symbols"`
-	Workers []string `json:"workers"`
+	PartitionID string   `json:"partition_id"`
+	Symbols     []string `json:"symbols"`
+	Workers     []string `json:"workers"`
 }
 
 // SymbolMigrationInfo 记录 symbol 的迁移状态和新分区ID
@@ -17,8 +17,11 @@ type Partition struct {
 // Key: symbol
 // Value: {migrating: bool, newPartitionID: string}
 type SymbolMigrationInfo struct {
-	Migrating      bool   `json:"migrating"`
-	NewPartitionID string `json:"new_partition_id"`
+	Symbol     string `json:"symbol"`
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Migrating  bool   `json:"migrating"`
+	UpdateTime int64  `json:"update_time"`
 }
 
 // PartitionTable 维护 symbol 到分区的多对多映射和迁移状态
@@ -49,9 +52,9 @@ func (p *Partition) DeepCopy() *Partition {
 	newWorkers := make([]string, len(p.Workers))
 	copy(newWorkers, p.Workers)
 	return &Partition{
-		ID:      p.ID,
-		Symbols: newSymbols,
-		Workers: newWorkers,
+		PartitionID: p.PartitionID,
+		Symbols:     newSymbols,
+		Workers:     newWorkers,
 	}
 }
 
@@ -73,8 +76,11 @@ func (pt *PartitionTable) DeepCopy() *PartitionTable {
 	newMigrationInfo := make(map[string]*SymbolMigrationInfo, len(pt.MigrationInfo))
 	for k, v := range pt.MigrationInfo {
 		newMigrationInfo[k] = &SymbolMigrationInfo{
-			Migrating:      v.Migrating,
-			NewPartitionID: v.NewPartitionID,
+			Symbol:     v.Symbol,
+			From:       v.From,
+			To:         v.To,
+			Migrating:  v.Migrating,
+			UpdateTime: v.UpdateTime,
 		}
 	}
 	return &PartitionTable{

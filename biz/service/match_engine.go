@@ -14,8 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/cloudwego/hertz/pkg/common/hlog"
-	"github.com/segmentio/kafka-go"
 	"math/rand"
 	"net/http"
 	"runtime"
@@ -23,6 +21,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/segmentio/kafka-go"
 )
 
 // 撮合引擎接口
