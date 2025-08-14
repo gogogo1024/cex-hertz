@@ -1,8 +1,9 @@
 package pg
 
 import (
-	"cex-hertz/biz/model"
 	"time"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
 )
 
 // QueryTradesBysymbolAndTime 查询某交易对在指定时间段的成交数据

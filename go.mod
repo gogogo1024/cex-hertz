@@ -1,4 +1,4 @@
-module cex-hertz
+module github.com/gogogo1024/cex-hertz-backend
 
 go 1.24.4
 

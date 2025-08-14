@@ -1,9 +1,10 @@
 package redis
 
 import (
-	"cex-hertz/conf"
 	"context"
 	"fmt"
+
+	"github.com/gogogo1024/cex-hertz-backend/conf"
 	"github.com/redis/go-redis/v9"
 )
 

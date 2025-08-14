@@ -1,7 +1,8 @@
 package pg
 
 import (
-	"cex-hertz/biz/model"
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
+
 	"gorm.io/gorm/clause"
 )
 

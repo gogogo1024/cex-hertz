@@ -3,8 +3,8 @@
 package main
 
 import (
-	handler "cex-hertz/biz/handler"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	handler "github.com/gogogo1024/cex-hertz-backend/biz/handler"
 )
 
 // customizeRegister registers customize routers.

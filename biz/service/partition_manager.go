@@ -1,12 +1,13 @@
 package service
 
 import (
-	"cex-hertz/biz/model"
 	"context"
 	"encoding/json"
-	"github.com/hashicorp/consul/api"
 	"sync"
 	"time"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
+	"github.com/hashicorp/consul/api"
 )
 
 const partitionTableConsulKey = "partition/table"

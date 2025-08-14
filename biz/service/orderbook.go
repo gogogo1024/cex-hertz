@@ -1,8 +1,10 @@
 package service
 
 import (
-	"cex-hertz/biz/model"
 	"fmt"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
+
 	"github.com/huandu/skiplist"
 )
 
@@ -23,81 +25,93 @@ func NewOrderBook(symbol string) *OrderBook {
 func (ob *OrderBook) Match(order model.SubmitOrderMsg) ([]model.Trade, bool) {
 	var trades []model.Trade
 	remainQty := toFloat(order.Quantity)
-	if order.Side == "buy" {
-		for remainQty > 0 && ob.sells.Len() > 0 {
-			minSellElem := ob.sells.Front()
-			minSellPrice := minSellElem.Key().(string)
-			if toFloat(order.Price) >= toFloat(minSellPrice) {
-				sellQueue := minSellElem.Value.([]model.SubmitOrderMsg)
-				sell := &sellQueue[0]
-				makerQty := toFloat(sell.Quantity)
-				tradeQty := minFloat(remainQty, makerQty)
-				trades = append(trades, model.Trade{
-					Price:        sell.Price,
-					Quantity:     fmt.Sprintf("%.8f", tradeQty),
-					TakerOrderID: order.OrderID,
-					MakerOrderID: sell.OrderID,
-					Side:         "buy",
-				})
-				remainQty -= tradeQty
-				sell.Quantity = fmt.Sprintf("%.8f", makerQty-tradeQty)
-				if sell.Quantity == "0.00000000" {
-					sellQueue = sellQueue[1:]
-					if len(sellQueue) == 0 {
-						ob.sells.Remove(minSellElem)
-					} else {
-						minSellElem.Value = sellQueue
-					}
-				} else {
-					minSellElem.Value = sellQueue
-				}
-			} else {
-				break
-			}
-		}
+
+	switch order.Side {
+	case "buy":
+		trades, remainQty = ob.matchBuyOrder(order, remainQty)
 		if remainQty > 0 {
 			ob.addOrder(ob.buys, order)
 		}
 		return trades, len(trades) > 0
-	}
-	if order.Side == "sell" {
-		for remainQty > 0 && ob.buys.Len() > 0 {
-			maxBuyElem := ob.buys.Front()
-			maxBuyPrice := maxBuyElem.Key().(string)
-			if toFloat(order.Price) <= toFloat(maxBuyPrice) {
-				buyQueue := maxBuyElem.Value.([]model.SubmitOrderMsg)
-				buy := &buyQueue[0]
-				makerQty := toFloat(buy.Quantity)
-				tradeQty := minFloat(remainQty, makerQty)
-				trades = append(trades, model.Trade{
-					Price:        buy.Price,
-					Quantity:     fmt.Sprintf("%.8f", tradeQty),
-					TakerOrderID: order.OrderID,
-					MakerOrderID: buy.OrderID,
-					Side:         "sell",
-				})
-				remainQty -= tradeQty
-				buy.Quantity = fmt.Sprintf("%.8f", makerQty-tradeQty)
-				if buy.Quantity == "0.00000000" {
-					buyQueue = buyQueue[1:]
-					if len(buyQueue) == 0 {
-						ob.buys.Remove(maxBuyElem)
-					} else {
-						maxBuyElem.Value = buyQueue
-					}
-				} else {
-					maxBuyElem.Value = buyQueue
-				}
-			} else {
-				break
-			}
-		}
+	case "sell":
+		trades, remainQty = ob.matchSellOrder(order, remainQty)
 		if remainQty > 0 {
 			ob.addOrder(ob.sells, order)
 		}
 		return trades, len(trades) > 0
+	default:
+		return trades, false
 	}
-	return trades, false
+}
+
+func (ob *OrderBook) matchBuyOrder(order model.SubmitOrderMsg, remainQty float64) ([]model.Trade, float64) {
+	var trades []model.Trade
+	for remainQty > 0 && ob.sells.Len() > 0 {
+		minSellElem := ob.sells.Front()
+		minSellPrice := minSellElem.Key().(string)
+		if toFloat(order.Price) < toFloat(minSellPrice) {
+			break
+		}
+		sellQueue := minSellElem.Value.([]model.SubmitOrderMsg)
+		sell := &sellQueue[0]
+		makerQty := toFloat(sell.Quantity)
+		tradeQty := minFloat(remainQty, makerQty)
+		trades = append(trades, model.Trade{
+			Price:        sell.Price,
+			Quantity:     fmt.Sprintf("%.8f", tradeQty),
+			TakerOrderID: order.OrderID,
+			MakerOrderID: sell.OrderID,
+			Side:         "buy",
+		})
+		remainQty -= tradeQty
+		sell.Quantity = fmt.Sprintf("%.8f", makerQty-tradeQty)
+		if sell.Quantity == "0.00000000" {
+			sellQueue = sellQueue[1:]
+			if len(sellQueue) == 0 {
+				ob.sells.Remove(minSellElem)
+			} else {
+				minSellElem.Value = sellQueue
+			}
+		} else {
+			minSellElem.Value = sellQueue
+		}
+	}
+	return trades, remainQty
+}
+
+func (ob *OrderBook) matchSellOrder(order model.SubmitOrderMsg, remainQty float64) ([]model.Trade, float64) {
+	var trades []model.Trade
+	for remainQty > 0 && ob.buys.Len() > 0 {
+		maxBuyElem := ob.buys.Front()
+		maxBuyPrice := maxBuyElem.Key().(string)
+		if toFloat(order.Price) > toFloat(maxBuyPrice) {
+			break
+		}
+		buyQueue := maxBuyElem.Value.([]model.SubmitOrderMsg)
+		buy := &buyQueue[0]
+		makerQty := toFloat(buy.Quantity)
+		tradeQty := minFloat(remainQty, makerQty)
+		trades = append(trades, model.Trade{
+			Price:        buy.Price,
+			Quantity:     fmt.Sprintf("%.8f", tradeQty),
+			TakerOrderID: order.OrderID,
+			MakerOrderID: buy.OrderID,
+			Side:         "sell",
+		})
+		remainQty -= tradeQty
+		buy.Quantity = fmt.Sprintf("%.8f", makerQty-tradeQty)
+		if buy.Quantity == "0.00000000" {
+			buyQueue = buyQueue[1:]
+			if len(buyQueue) == 0 {
+				ob.buys.Remove(maxBuyElem)
+			} else {
+				maxBuyElem.Value = buyQueue
+			}
+		} else {
+			maxBuyElem.Value = buyQueue
+		}
+	}
+	return trades, remainQty
 }
 
 func (ob *OrderBook) addOrder(book *skiplist.SkipList, order model.SubmitOrderMsg) {

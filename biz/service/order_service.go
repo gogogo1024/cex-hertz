@@ -1,8 +1,8 @@
 package service
 
 import (
-	"cex-hertz/biz/dal/pg"
-	"cex-hertz/biz/model"
+	"github.com/gogogo1024/cex-hertz-backend/biz/dal/pg"
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
 )
 
 // InsertOrder 业务层只做聚合和编排，所有数据操作通过pg.order_repo.go

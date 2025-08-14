@@ -7,7 +7,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
-	"cex-hertz/biz/model"
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
 )
 
 var (

@@ -2,9 +2,11 @@ package engine
 
 import (
 	"bytes"
-	"cex-hertz/biz/model"
-	"github.com/panjf2000/ants/v2"
 	"sync"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
+
+	"github.com/panjf2000/ants/v2"
 )
 
 var BufferPool = sync.Pool{
@@ -15,7 +17,8 @@ var BufferPool = sync.Pool{
 
 var MsgBytePool = sync.Pool{
 	New: func() any {
-		return make([]byte, 4096)
+		b := make([]byte, 4096)
+		return &b
 	},
 }
 

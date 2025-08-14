@@ -1,10 +1,11 @@
 package service
 
 import (
-	"cex-hertz/biz/model"
 	"context"
 	"sync"
 	"time"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
 )
 
 // PartitionMetricsProvider 分区负载采集接口

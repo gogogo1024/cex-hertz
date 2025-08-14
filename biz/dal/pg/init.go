@@ -1,10 +1,11 @@
 package pg
 
 import (
-	"cex-hertz/biz/model"
-	"cex-hertz/conf"
 	"context"
 	"fmt"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
+	"github.com/gogogo1024/cex-hertz-backend/conf"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

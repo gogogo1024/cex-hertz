@@ -17,11 +17,12 @@ type Partition struct {
 // Key: symbol
 // Value: {migrating: bool, newPartitionID: string}
 type SymbolMigrationInfo struct {
-	Symbol     string `json:"symbol"`
-	From       string `json:"from"`
-	To         string `json:"to"`
-	Migrating  bool   `json:"migrating"`
-	UpdateTime int64  `json:"update_time"`
+	Symbol         string `json:"symbol"`
+	From           string `json:"from"`
+	To             string `json:"to"`
+	Migrating      bool   `json:"migrating"`
+	UpdateTime     int64  `json:"update_time"`
+	NewPartitionID string `json:"new_partition_id"` // 新分区ID
 }
 
 // PartitionTable 维护 symbol 到分区的多对多映射和迁移状态

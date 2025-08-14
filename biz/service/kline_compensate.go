@@ -1,14 +1,15 @@
 package service
 
 import (
-	"cex-hertz/biz/dal/pg"
-	"cex-hertz/biz/model"
-	"github.com/cloudwego/hertz/pkg/common/hlog"
-	"github.com/hashicorp/consul/api"
-	"go.uber.org/zap"
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/gogogo1024/cex-hertz-backend/biz/dal/pg"
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
+	"github.com/hashicorp/consul/api"
+	"go.uber.org/zap"
 )
 
 // StartKlineCompensateTask KlineCompensateTask 定时补偿/修正 K 线任务

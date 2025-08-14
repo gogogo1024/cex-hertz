@@ -1,10 +1,11 @@
 package service
 
 import (
-	"cex-hertz/biz/dal/pg"
-	"cex-hertz/biz/model"
 	"os"
 	"testing"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/dal/pg"
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
 )
 
 func TestMain(m *testing.M) {

@@ -1,11 +1,12 @@
 package kafka
 
 import (
-	"cex-hertz/conf"
 	"context"
 	"fmt"
-	"github.com/segmentio/kafka-go"
 	"sync"
+
+	"github.com/gogogo1024/cex-hertz-backend/conf"
+	"github.com/segmentio/kafka-go"
 )
 
 var (

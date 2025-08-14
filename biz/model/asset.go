@@ -18,7 +18,7 @@ type Balance struct {
 type Position struct {
 	ID       uint   `gorm:"primaryKey"`
 	UserID   string `gorm:"index;not null"`
-	symbol   string `gorm:"index;not null"` // 交易对
+	Symbol   string `gorm:"index;not null"` // 交易对
 	Volume   string `gorm:"not null"`       // 持仓数量
 	AvgPrice string `gorm:"not null"`       // 持仓均价
 }

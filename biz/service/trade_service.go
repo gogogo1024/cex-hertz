@@ -1,9 +1,10 @@
 package service
 
 import (
-	"cex-hertz/biz/dal/pg"
-	"cex-hertz/biz/model"
 	"time"
+
+	"github.com/gogogo1024/cex-hertz-backend/biz/dal/pg"
+	"github.com/gogogo1024/cex-hertz-backend/biz/model"
 )
 
 // TradeService 封装，调用包级别函数

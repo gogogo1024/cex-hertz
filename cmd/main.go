@@ -1,8 +1,8 @@
 package main
 
 import (
-	"cex-hertz/conf"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/gogogo1024/cex-hertz-backend/conf"
 	"github.com/joho/godotenv"
 )
 

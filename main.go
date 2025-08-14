@@ -3,28 +3,29 @@
 package main
 
 import (
-	"cex-hertz/biz/dal"
-	"cex-hertz/biz/handler"
-	"cex-hertz/biz/service"
-	"cex-hertz/biz/util"
-	"cex-hertz/conf"
-	"cex-hertz/middleware"
-	cexserver "cex-hertz/server"
 	"context"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
 	"github.com/cloudwego/hertz/pkg/app/middlewares/server/recovery"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/gogogo1024/cex-hertz-backend/biz/dal"
+	"github.com/gogogo1024/cex-hertz-backend/biz/handler"
+	"github.com/gogogo1024/cex-hertz-backend/biz/service"
+	"github.com/gogogo1024/cex-hertz-backend/biz/util"
+	"github.com/gogogo1024/cex-hertz-backend/conf"
+	"github.com/gogogo1024/cex-hertz-backend/middleware"
+	cexserver "github.com/gogogo1024/cex-hertz-backend/server"
 	"github.com/hertz-contrib/cors"
 	"github.com/hertz-contrib/gzip"
 	"github.com/hertz-contrib/logger/accesslog"
 	"github.com/hertz-contrib/pprof"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
-	"os"
-	"os/signal"
-	"strconv"
-	"syscall"
-	"time"
 )
 
 func main() {
