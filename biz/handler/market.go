@@ -14,34 +14,23 @@ import (
 )
 
 // GetDepth 获取深度（订单簿快照）
-func GetDepth(c context.Context, ctx *app.RequestContext) {
-	symbol := string(ctx.Query("symbol"))
-	if symbol == "" {
-		ctx.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "symbol参数不能为空"})
-		return
-	}
-	// 分别获取买卖档数
-	bidLimitStr := string(ctx.Query("bid_limit"))
-	askLimitStr := string(ctx.Query("ask_limit"))
-	bidLimit := 20
-	askLimit := 20
-	if bidLimitStr != "" {
-		if l, err := strconv.Atoi(bidLimitStr); err == nil && l > 0 {
-			bidLimit = l
+type depthItem struct {
+	Price    float64
+	Amount   float64
+	Count    int
+	PriceStr string
+}
+
+func parseLimit(limitStr string, defaultLimit int) int {
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			return l
 		}
 	}
-	if askLimitStr != "" {
-		if l, err := strconv.Atoi(askLimitStr); err == nil && l > 0 {
-			askLimit = l
-		}
-	}
-	orders, _ := pg.ListOrders("", "active")
-	type depthItem struct {
-		Price    float64
-		Amount   float64
-		Count    int
-		PriceStr string
-	}
+	return defaultLimit
+}
+
+func aggregateOrders(orders []model.Order, symbol string) (map[string]*depthItem, map[string]*depthItem) {
 	bidsAgg := make(map[string]*depthItem)
 	asksAgg := make(map[string]*depthItem)
 	for _, o := range orders {
@@ -56,13 +45,14 @@ func GetDepth(c context.Context, ctx *app.RequestContext) {
 		if err != nil {
 			continue
 		}
-		if o.Side == "buy" {
+		switch o.Side {
+		case "buy":
 			if bidsAgg[o.Price] == nil {
 				bidsAgg[o.Price] = &depthItem{Price: price, PriceStr: o.Price}
 			}
 			bidsAgg[o.Price].Amount += qty
 			bidsAgg[o.Price].Count++
-		} else if o.Side == "sell" {
+		case "sell":
 			if asksAgg[o.Price] == nil {
 				asksAgg[o.Price] = &depthItem{Price: price, PriceStr: o.Price}
 			}
@@ -70,32 +60,50 @@ func GetDepth(c context.Context, ctx *app.RequestContext) {
 			asksAgg[o.Price].Count++
 		}
 	}
-	bids := make([]map[string]interface{}, 0, len(bidsAgg))
-	asks := make([]map[string]interface{}, 0, len(asksAgg))
-	for _, agg := range bidsAgg {
-		bids = append(bids, map[string]interface{}{
+	return bidsAgg, asksAgg
+}
+
+func depthItemsToSlice(items map[string]*depthItem) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(items))
+	for _, agg := range items {
+		result = append(result, map[string]interface{}{
 			"price":  agg.PriceStr,
 			"amount": strconv.FormatFloat(agg.Amount, 'f', -1, 64),
 			"count":  agg.Count,
 		})
 	}
-	for _, agg := range asksAgg {
-		asks = append(asks, map[string]interface{}{
-			"price":  agg.PriceStr,
-			"amount": strconv.FormatFloat(agg.Amount, 'f', -1, 64),
-			"count":  agg.Count,
-		})
-	}
-	sort.Slice(bids, func(i, j int) bool {
-		pi, _ := strconv.ParseFloat(bids[i]["price"].(string), 64)
-		pj, _ := strconv.ParseFloat(bids[j]["price"].(string), 64)
-		return pi > pj
-	})
-	sort.Slice(asks, func(i, j int) bool {
-		pi, _ := strconv.ParseFloat(asks[i]["price"].(string), 64)
-		pj, _ := strconv.ParseFloat(asks[j]["price"].(string), 64)
+	return result
+}
+
+func sortDepth(items []map[string]interface{}, desc bool) {
+	sort.Slice(items, func(i, j int) bool {
+		pi, _ := strconv.ParseFloat(items[i]["price"].(string), 64)
+		pj, _ := strconv.ParseFloat(items[j]["price"].(string), 64)
+		if desc {
+			return pi > pj
+		}
 		return pi < pj
 	})
+}
+
+func GetDepth(c context.Context, ctx *app.RequestContext) {
+	symbol := string(ctx.Query("symbol"))
+	if symbol == "" {
+		ctx.JSON(consts.StatusBadRequest, map[string]interface{}{"error": "symbol参数不能为空"})
+		return
+	}
+	bidLimit := parseLimit(string(ctx.Query("bid_limit")), 20)
+	askLimit := parseLimit(string(ctx.Query("ask_limit")), 20)
+
+	orders, _ := pg.ListOrders("", "active")
+	bidsAgg, asksAgg := aggregateOrders(orders, symbol)
+
+	bids := depthItemsToSlice(bidsAgg)
+	asks := depthItemsToSlice(asksAgg)
+
+	sortDepth(bids, true)
+	sortDepth(asks, false)
+
 	if len(bids) > bidLimit {
 		bids = bids[:bidLimit]
 	}

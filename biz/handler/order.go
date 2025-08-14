@@ -14,7 +14,7 @@ import (
 
 type SubmitOrderRequest struct {
 	OrderID  string `json:"order_id"`
-	symbol   string `json:"symbol"`
+	Symbol   string `json:"symbol"`
 	Side     string `json:"side"`
 	Price    string `json:"price"`
 	Quantity string `json:"quantity"`
@@ -23,7 +23,7 @@ type SubmitOrderRequest struct {
 type SubmitOrderResponse struct {
 	Type    string `json:"type"`
 	OrderID string `json:"order_id"`
-	symbol  string `json:"symbol"`
+	Symbol  string `json:"symbol"`
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
 }

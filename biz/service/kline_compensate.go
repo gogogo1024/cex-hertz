@@ -76,42 +76,45 @@ func CompensateKline() error {
 		if err != nil || len(trades) == 0 {
 			continue
 		}
-		// 按时间排序
-		sort.Slice(trades, func(i, j int) bool { return trades[i].Timestamp < trades[j].Timestamp })
-		open := trades[0].Price
-		close := trades[len(trades)-1].Price
-		high := trades[0].Price
-		low := trades[0].Price
-		var volume float64
-		for _, t := range trades {
-			price, _ := strconv.ParseFloat(t.Price, 64)
-			qty, _ := strconv.ParseFloat(t.Quantity, 64)
-			if price > mustParseFloat(high) {
-				high = t.Price
-			}
-			if price < mustParseFloat(low) {
-				low = t.Price
-			}
-			volume += qty
-		}
-		kline := model.Kline{
-			Symbol:    symbol,
-			Period:    "1m",
-			Timestamp: start.Unix(),
-			Open:      open,
-			Close:     close,
-			High:      high,
-			Low:       low,
-			Volume:    strconv.FormatFloat(volume, 'f', -1, 64),
-		}
+		kline := calculateKline(symbol, trades, start)
 		err = pg.UpsertKline(&kline)
 		if err != nil {
 			hlog.Errorf("K线 upsert 失败: %v, symbol=%s, ts=%d", err, symbol, start.Unix())
 		}
-
 	}
 	hlog.Info("K线补偿任务执行: ", zap.Time("start", start), zap.Time("end", end))
 	return nil
+}
+
+// calculateKline 计算单个 symbol 的 kline 数据
+func calculateKline(symbol string, trades []model.Trade, start time.Time) model.Kline {
+	sort.Slice(trades, func(i, j int) bool { return trades[i].Timestamp < trades[j].Timestamp })
+	open := trades[0].Price
+	close := trades[len(trades)-1].Price
+	high := trades[0].Price
+	low := trades[0].Price
+	var volume float64
+	for _, t := range trades {
+		price, _ := strconv.ParseFloat(t.Price, 64)
+		qty, _ := strconv.ParseFloat(t.Quantity, 64)
+		if price > mustParseFloat(high) {
+			high = t.Price
+		}
+		if price < mustParseFloat(low) {
+			low = t.Price
+		}
+		volume += qty
+	}
+	return model.Kline{
+		Symbol:    symbol,
+		Period:    "1m",
+		Timestamp: start.Unix(),
+		Open:      open,
+		Close:     close,
+		High:      high,
+		Low:       low,
+		Volume:    strconv.FormatFloat(volume, 'f', -1, 64),
+	}
 }
 
 func mustParseFloat(s string) float64 {

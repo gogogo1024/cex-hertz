@@ -5,18 +5,7 @@ import (
 )
 
 // InsertOrder 插入订单
-func InsertOrder(orderID, userID, symbol, side, price, quantity, status string, createdAt, updatedAt int64) error {
-	order := &model.Order{
-		OrderID:   orderID,
-		UserID:    userID,
-		Symbol:    symbol,
-		Side:      side,
-		Price:     price,
-		Quantity:  quantity,
-		Status:    status,
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
-	}
+func InsertOrder(order *model.Order) error {
 	return GormDB.Create(order).Error
 }
 

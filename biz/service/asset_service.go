@@ -34,7 +34,8 @@ func BuyPosition(userID, symbol, buyQty, buyPrice string) error {
 	err := pg.GormDB.Where("user_id = ? AND symbol = ?", userID, symbol).First(&pos).Error
 	buyQtyF, _ := strconv.ParseFloat(buyQty, 64)
 	buyPriceF, _ := strconv.ParseFloat(buyPrice, 64)
-	if err == gorm.ErrRecordNotFound {
+	switch err {
+	case gorm.ErrRecordNotFound:
 		// 新持仓
 		pos = model.Position{
 			UserID:   userID,
@@ -43,7 +44,7 @@ func BuyPosition(userID, symbol, buyQty, buyPrice string) error {
 			AvgPrice: buyPrice,
 		}
 		return pg.GormDB.Create(&pos).Error
-	} else if err == nil {
+	case nil:
 		// 加权均价
 		oldQty, _ := strconv.ParseFloat(pos.Volume, 64)
 		oldAvg, _ := strconv.ParseFloat(pos.AvgPrice, 64)

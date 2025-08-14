@@ -4,7 +4,6 @@ go 1.24.4
 
 require (
 	github.com/cloudwego/hertz v0.10.1
-	github.com/cloudwego/netpoll v0.7.1
 	github.com/hashicorp/consul/api v1.32.1
 	github.com/hertz-contrib/cors v0.1.0
 	github.com/hertz-contrib/gzip v0.0.3
@@ -35,6 +34,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.5 // indirect
 	github.com/cloudwego/gopkg v0.1.4 // indirect
+	github.com/cloudwego/netpoll v0.7.1 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/felixge/fgprof v0.9.3 // indirect

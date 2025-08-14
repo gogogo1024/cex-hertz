@@ -1,8 +1,10 @@
 package service
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/gogogo1024/cex-hertz-backend/biz/dal/redis"
 	"github.com/gogogo1024/cex-hertz-backend/biz/model"
 
 	"github.com/huandu/skiplist"
@@ -151,80 +153,101 @@ type OrderBookSnapshot struct {
 }
 
 func (ob *OrderBook) DeltaSnapshot(last *OrderBookSnapshot) map[string]interface{} {
-	currBids := map[string]string{}
-	for iter := ob.buys.Front(); iter != nil; iter = iter.Next() {
-		queue := iter.Value.([]model.SubmitOrderMsg)
-		for _, o := range queue {
-			currBids[o.Price] = o.Quantity
-		}
-	}
-	currAsks := map[string]string{}
-	for iter := ob.sells.Front(); iter != nil; iter = iter.Next() {
-		queue := iter.Value.([]model.SubmitOrderMsg)
-		for _, o := range queue {
-			currAsks[o.Price] = o.Quantity
-		}
-	}
-	bidsDelta := map[string]string{}
-	asksDelta := map[string]string{}
-	for price, qty := range currBids {
-		if last == nil || last.Bids == nil || last.Bids[price] != qty {
-			bidsDelta[price] = qty
-		}
-	}
-	if last != nil && last.Bids != nil {
-		for price := range last.Bids {
-			if _, ok := currBids[price]; !ok {
-				bidsDelta[price] = "0"
-			}
-		}
-	}
-	for price, qty := range currAsks {
-		if last == nil || last.Asks == nil || last.Asks[price] != qty {
-			asksDelta[price] = qty
-		}
-	}
-	if last != nil && last.Asks != nil {
-		for price := range last.Asks {
-			if _, ok := currAsks[price]; !ok {
-				asksDelta[price] = "0"
-			}
-		}
-	}
+	currBids := ob.getCurrentSnapshot(ob.buys)
+	currAsks := ob.getCurrentSnapshot(ob.sells)
+	bidsDelta := calculateDelta(currBids, last, true)
+	asksDelta := calculateDelta(currAsks, last, false)
 	return map[string]interface{}{
 		"bids_delta": bidsDelta,
 		"asks_delta": asksDelta,
 	}
 }
 
+func (ob *OrderBook) getCurrentSnapshot(book *skiplist.SkipList) map[string]string {
+	result := map[string]string{}
+	for iter := book.Front(); iter != nil; iter = iter.Next() {
+		queue := iter.Value.([]model.SubmitOrderMsg)
+		for _, o := range queue {
+			result[o.Price] = o.Quantity
+		}
+	}
+	return result
+}
+
+func calculateDelta(curr map[string]string, last *OrderBookSnapshot, isBid bool) map[string]string {
+	delta := map[string]string{}
+	var lastMap map[string]string
+	if last != nil {
+		if isBid {
+			lastMap = last.Bids
+		} else {
+			lastMap = last.Asks
+		}
+	}
+	for price, qty := range curr {
+		if lastMap == nil || lastMap[price] != qty {
+			delta[price] = qty
+		}
+	}
+	for price := range lastMap {
+		if _, ok := curr[price]; !ok {
+			delta[price] = "0"
+		}
+	}
+	return delta
+}
+
 // CancelOrder 撤单功能：根据 order_id 和 side 撤销订单
 func (ob *OrderBook) CancelOrder(orderID, side string, userID string) bool {
 	var book *skiplist.SkipList
-	if side == "buy" {
+	switch side {
+	case "buy":
 		book = ob.buys
-	} else if side == "sell" {
+	case "sell":
 		book = ob.sells
-	} else {
+	default:
 		return false
 	}
+	return cancelOrderInBook(book, orderID, userID)
+}
+
+func cancelOrderInBook(book *skiplist.SkipList, orderID, userID string) bool {
 	for iter := book.Front(); iter != nil; iter = iter.Next() {
 		queue := iter.Value.([]model.SubmitOrderMsg)
-		for i, o := range queue {
-			if o.OrderID == orderID {
-				queue = append(queue[:i], queue[i+1:]...)
-				if len(queue) == 0 {
-					book.Remove(iter)
-				} else {
-					iter.Value = queue
-				}
-				if userID != "" {
-					removeUserActiveOrder(userID, orderID)
-				}
-				return true
+		idx := findOrderIndex(queue, orderID)
+		if idx != -1 {
+			queue = append(queue[:idx], queue[idx+1:]...)
+			if len(queue) == 0 {
+				book.Remove(iter)
+			} else {
+				iter.Value = queue
 			}
+			if userID != "" {
+				removeUserActiveOrder(userID, orderID)
+			}
+			return true
 		}
 	}
 	return false
+}
+
+func findOrderIndex(queue []model.SubmitOrderMsg, orderID string) int {
+	for i, o := range queue {
+		if o.OrderID == orderID {
+			return i
+		}
+	}
+	return -1
+}
+
+// 从 Redis 移除用户活跃订单ID
+func removeUserActiveOrder(userID, orderID string) {
+	if userID == "" || orderID == "" {
+		return
+	}
+	ctx := context.Background()
+	key := "user:active_orders:" + userID
+	redis.Client.SRem(ctx, key, orderID)
 }
 
 // 跳表价格比较器
