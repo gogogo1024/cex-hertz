@@ -54,18 +54,7 @@ func DistributedRouteMiddleware(pm *service.PartitionManager, localAddr string) 
 					break
 				}
 			}
-			if !isLocal {
-				hlog.Infof("[DistributedRouteMiddleware] forward order for symbol=%s", symbol)
-				if err := service.ForwardOrderToMatchEngine(symbol, c.Request.Body()); err != nil {
-					hlog.Errorf("order forward failed: %v", err)
-					c.String(502, "order forward failed: %v", err)
-					c.Abort()
-					return
-				}
-				c.String(200, "order forwarded")
-				c.Abort()
-				return
-			}
+
 		}
 		hlog.Infof("[DistributedRouteMiddleware] pass through, path=%s", c.Path())
 		c.Next(ctx)

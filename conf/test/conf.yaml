@@ -1,5 +1,5 @@
 hertz:
-  service: "cex-hertz"
+  service: "cex-hertz-backend"
   address: ":8080"
   enable_pprof: true
   enable_gzip: true

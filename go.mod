@@ -50,6 +50,7 @@ require (
 	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/serf v0.10.1 // indirect
+	github.com/hertz-contrib/registry/consul v0.0.0-20250319055937-8a220332e808 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

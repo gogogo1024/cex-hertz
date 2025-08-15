@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"runtime"
 	"runtime/debug"
@@ -71,7 +70,6 @@ var (
 	userOrderMap      sync.Map // userID -> []orderID
 	orderStatus       sync.Map // orderID -> status
 	userOrderMuMap    sync.Map // userID -> *sync.Mutex 获取用户订单互斥锁，防止并发append
-	consulHelper      *ConsulHelper
 	MatchResultPusher func(msgType, symbol, orderID, price, quantity, status string, ts int64)
 	// Removed duplicate variable declarations
 	// 已清理所有重复声明
@@ -935,28 +933,6 @@ func saveTradeToKafka(trade model.Trade) {
 	if tradeBatchChan != nil {
 		tradeBatchChan <- trade
 	}
-}
-
-// ForwardOrderToMatchEngine 转发订单到目的撮合节点（HTTP示例）
-func ForwardOrderToMatchEngine(symbol string, data []byte) error {
-	if consulHelper == nil {
-		return fmt.Errorf("consul not initialized")
-	}
-	nodes, err := consulHelper.DiscoverMatchEngine(symbol)
-	if err != nil || len(nodes) == 0 {
-		return fmt.Errorf("no match engine found for symbol %s", symbol)
-	}
-	// 随机选择一个节点实现负载均衡
-	idx := rand.Intn(len(nodes))
-	url := fmt.Sprintf("http://%s:%d/submit_order", nodes[idx].Address, nodes[idx].Port)
-	resp, err := httpPost(url, data)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("remote match engine error: %s", resp.Status)
-	}
-	return nil
 }
 
 // httpPost 简单HTTP POST封装

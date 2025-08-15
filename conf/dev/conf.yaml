@@ -1,5 +1,5 @@
 hertz:
-  service: "cex-hertz"
+  service: "cex-hertz-backend"
   address: ":8080"
   enable_pprof: true
   enable_gzip: true
@@ -34,8 +34,8 @@ kafka:
   brokers:
     - "localhost:9092"
   topics:
-    trade: "trades"
-    order: "orders"
+    trade: "trade"
+    order: "order"
 match_engine:
   node_id: "node-1"
   match_symbols: "BTCUSDT,ETHUSDT"

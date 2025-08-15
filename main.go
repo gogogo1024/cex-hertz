@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app/middlewares/server/recovery"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/app/server/registry"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/cloudwego/hertz/pkg/common/utils"
 	"github.com/gogogo1024/cex-hertz-backend/biz/dal"
 	"github.com/gogogo1024/cex-hertz-backend/biz/handler"
 	"github.com/gogogo1024/cex-hertz-backend/biz/service"
@@ -20,10 +23,12 @@ import (
 	"github.com/gogogo1024/cex-hertz-backend/conf"
 	"github.com/gogogo1024/cex-hertz-backend/middleware"
 	cexserver "github.com/gogogo1024/cex-hertz-backend/server"
+	consulapi "github.com/hashicorp/consul/api"
 	"github.com/hertz-contrib/cors"
 	"github.com/hertz-contrib/gzip"
 	"github.com/hertz-contrib/logger/accesslog"
 	"github.com/hertz-contrib/pprof"
+	"github.com/hertz-contrib/registry/consul"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -31,42 +36,60 @@ import (
 func main() {
 	cfg := conf.GetConf()
 	dal.Init()
-	// GORM DB 初始化和自动迁移已由 dal.Init() 内部完成，无需重复初始化
+	consulClient := initConsul(cfg)
+	h := initHertzServer(cfg, consulClient)
+	wsServer, pm, localAddr := initBusiness(cfg, h)
+	defer h.Shutdown(context.Background())
+	defer wsServer.Shutdown(context.Background())
+	startBackgroundTasks(cfg, pm, consulClient, localAddr)
+	registerMiddleware(h)
+	registerRoutes(h)
+	go h.Spin()
+	go wsServer.Spin()
+	waitForExit()
+	service.ShutdownOrderKafkaWriter()
+}
+func initConsul(cfg *conf.Config) *consulapi.Client {
+	config := consulapi.DefaultConfig()
+	config.Address = cfg.Registry.RegistryAddress[0]
+	consulClient, err := consulapi.NewClient(config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return consulClient
+}
 
-	h := server.New(
-		server.WithExitWaitTime(10 * time.Second),
+func initHertzServer(cfg *conf.Config, consulClient *consulapi.Client) *server.Hertz {
+	r := consul.NewConsulRegister(consulClient)
+	addr := cfg.Hertz.Address
+	serviceName := cfg.Hertz.Service
+	h := server.Default(
+		server.WithHostPorts(addr),
+		server.WithRegistry(r, &registry.Info{
+			ServiceName: serviceName,
+			Addr:        utils.NewNetAddr("tcp", addr),
+			Weight:      10,
+			Tags:        nil,
+		}),
+		server.WithExitWaitTime(10*time.Second),
 	)
-	// 注册优雅关闭钩子，保证Kafka消费者收尾
 	h.OnShutdown = append(h.OnShutdown, func(ctx context.Context) {
 		service.StopOrderKafkaConsumerWithTimeout(10 * time.Second)
 	})
+	return h
+}
 
+func initBusiness(cfg *conf.Config, h *server.Hertz) (*server.Hertz, *service.PartitionManager, string) {
 	hsPort := cfg.Hertz.WsPort
 	if len(hsPort) > 0 && hsPort[0] == ':' {
 		hsPort = hsPort[1:]
 	}
-	// 初始化 Postgres 连接池（如有需要可调用对应初始化）
-	// 初始化 Kafka Writer
 	service.InitKafkaWriter(cfg.Kafka.Brokers, cfg.Kafka.Topics["trade"])
-	// 初始化订单Kafka Writer和消费者（批量入库）
 	service.InitOrderKafkaWriter(cfg.Kafka.Topics["order"])
-	// 替换为本地RocksDB补偿恢复
 	service.RecoverCompensateOrders()
 	service.StartOrderKafkaConsumer(cfg.Kafka.Topics["order"])
-
-	// 初始化 Consul 并注册撮合引擎节点
-	consulAddrs := cfg.Registry.RegistryAddress // []string
-	if len(consulAddrs) == 0 {
-		panic("Consul address list is empty")
-	}
+	consulAddrs := cfg.Registry.RegistryAddress
 	matchPort := cfg.MatchEngine.MatchPort
-	// 使用多地址高可用
-	consulHelper, err := service.NewConsulHelperWithAddrs(consulAddrs)
-	if err != nil {
-		panic(err)
-	}
-
-	// 初始化 PartitionManager，支持多个 Consul 地址
 	pm, err := service.NewPartitionManager(consulAddrs)
 	if err != nil {
 		hlog.Fatalf("初始化 PartitionManager 失败: %v", err)
@@ -74,27 +97,9 @@ func main() {
 	if err := pm.LoadFromConsul(); err != nil {
 		hlog.Fatalf("加载分区表失败: %v", err)
 	}
-	// 获取本地IP和端口，生成 localAddr
 	localIP := util.GetLocalIP()
 	localAddr := localIP + ":" + strconv.Itoa(matchPort)
-	partitionTable := pm.GetPartitionTable()
-	// 获取当前 worker 负责的 symbol 列表，调用 PartitionTable 的新方法
-	symbols := partitionTable.GetSymbolsForWorker(localAddr)
-
-	// 创建 WebSocketServer 时传递 pm 和 localAddr
 	wsServer := cexserver.NewWebSocketServer(":"+hsPort, pm, localAddr)
-	defer h.Shutdown(context.Background())
-	defer wsServer.Shutdown(context.Background())
-
-	// worker注册到Consul，直接用 localAddr 作为唯一ID
-	if err := consulHelper.RegisterMatchEngine(localAddr, symbols, matchPort); err != nil {
-		hlog.Fatalf("worker注册到Consul失败: %v", err)
-	}
-
-	// 本地 worker 地址（可从配置）
-	//localIP := util.GetLocalIP()
-	//localAddr := localIP + ":" + strconv.Itoa(matchPort)
-	// 初始化撮合引擎，支持动态分区扩展
 	broadcaster := func(symbol string, msg []byte) {
 		cexserver.Broadcast(symbol, msg)
 	}
@@ -102,41 +107,22 @@ func main() {
 		cexserver.Unicast(userID, msg)
 	}
 	matchEngine := service.NewPartitionAwareMatchEngine(pm, localAddr, broadcaster, unicast)
-	// 可将 matchEngine 注入到 handler 或 service 层，供下单、撮合等业务调用
-
-	// 注入全局 handler 层撮合引擎实例，避免循环依赖
-	//rootHandler.SetEngine(matchEngine)
 	cexserver.InjectEngine(matchEngine)
-
-	// 注入撮合结果 websocket 推送方法，避免循环依赖
 	service.MatchResultPusher = cexserver.PushMatchResult
+	return wsServer, pm, localAddr
+}
 
-	// 启动基于 Consul 分布式锁的 K 线补偿定时任务
-	if consulHelper.Client() != nil {
-		service.StartKlineCompensateTask(consulHelper.Client())
-	}
-
-	// 启动自动扩缩容调度器（每分钟检查一次）
+func startBackgroundTasks(cfg *conf.Config, pm *service.PartitionManager, consulClient *consulapi.Client, localAddr string) {
+	service.StartKlineCompensateTask(consulClient)
 	metrics := &service.MockPartitionMetrics{} // TODO: 替换为真实采集实现
 	autoScaler := service.NewPartitionAutoScaler(pm, metrics, time.Minute)
 	go autoScaler.Run(context.Background())
+}
 
-	registerMiddleware(h)
-	registerRoutes(h)
-
-	go func() {
-		h.Spin()
-	}()
-	go func() {
-		wsServer.Spin()
-	}()
-
+func waitForExit() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-
-	// 优雅关闭Kafka订单写入协程
-	service.ShutdownOrderKafkaWriter()
 }
 
 func registerMiddleware(h *server.Hertz) {
